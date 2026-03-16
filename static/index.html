@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Isotonic</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800;1,14..32,400&display=swap" rel="stylesheet">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css?v=10">
+</head>
+<body>
+<div id="app">
+
+  <nav id="sidebar">
+    <div class="logo">
+      <img src="/static/logo-mark.svg" alt="" class="logo-mark" />
+      <span class="logo-wordmark">Isotonic</span>
+    </div>
+
+    <div class="nav-section">NBA</div>
+    <a href="#picks"    data-page="picks">   <i data-lucide="bar-chart-2"></i><span>Today's Picks</span></a>
+    <a href="#live"     data-page="live">    <i data-lucide="radio"></i><span>Live Games</span></a>
+    <a href="#matchup"  data-page="matchup"> <i data-lucide="zap"></i><span>Matchup Lab</span></a>
+    <a href="#paper"    data-page="paper">   <i data-lucide="trending-up"></i><span>Paper Trader</span></a>
+    <a href="#accuracy" data-page="accuracy"><i data-lucide="activity"></i><span>Model Accuracy</span></a>
+    <a href="#team"     data-page="team">    <i data-lucide="users"></i><span>Team Explorer</span></a>
+    <a href="#tracker"  data-page="tracker"> <i data-lucide="clipboard-list"></i><span>Bet Tracker</span></a>
+
+    <div class="nav-section">NCAA</div>
+    <a href="#nc-picks"    data-page="nc-picks">    <i data-lucide="bar-chart-2"></i><span>Today's Picks</span></a>
+    <a href="#nc-live"     data-page="nc-live">     <i data-lucide="radio"></i><span>Live Games</span></a>
+    <a href="#nc-matchup"  data-page="nc-matchup">  <i data-lucide="zap"></i><span>Matchup Lab</span></a>
+    <a href="#nc-trader"   data-page="nc-trader">   <i data-lucide="trending-up"></i><span>Paper Trader</span></a>
+    <a href="#nc-accuracy" data-page="nc-accuracy"> <i data-lucide="activity"></i><span>Model Accuracy</span></a>
+    <a href="#nc-teams"    data-page="nc-teams">    <i data-lucide="users"></i><span>Team Explorer</span></a>
+    <a href="#nc-tracker"  data-page="nc-tracker">  <i data-lucide="clipboard-list"></i><span>Bet Tracker</span></a>
+    <a href="#nc-bracket"  data-page="nc-bracket">  <i data-lucide="trophy"></i><span>Bracket</span></a>
+
+    <div class="nav-section">System</div>
+    <a href="#system"   data-page="system">  <i data-lucide="settings"></i><span>System</span></a>
+
+    <div class="sidebar-footer">
+      <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode">
+        <i data-lucide="sun"  class="icon-light"></i>
+        <i data-lucide="moon" class="icon-dark"></i>
+        <span class="theme-label-light">Light mode</span>
+        <span class="theme-label-dark">Dark mode</span>
+      </button>
+    </div>
+  </nav>
+
+  <main id="main">
+    <div class="skeleton-page">
+      <div class="skeleton-title"></div>
+      <div class="skeleton-grid">
+        <div class="skeleton-card"></div>
+        <div class="skeleton-card"></div>
+        <div class="skeleton-card"></div>
+        <div class="skeleton-card"></div>
+      </div>
+      <div class="skeleton-block"></div>
+      <div class="skeleton-block sk-short"></div>
+    </div>
+  </main>
+
+</div>
+<script src="/static/app.js?v=19"></script>
+</body>
+</html>
