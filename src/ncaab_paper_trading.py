@@ -23,6 +23,7 @@ import ncaab_config
 from src.evaluate import kelly_fraction
 
 logger = logging.getLogger(__name__)
+SUPPORTED_PAPER_MARKET_SOURCE = "kalshi"
 
 # ── CSV path for NCAAB paper trades ──────────────────────────────────────────
 NCAAB_PAPER_TRADES_CSV = Path("data/ncaab/paper_trades.csv")
@@ -57,11 +58,33 @@ MARKET_MARK_PRICE_COLS = {
 
 
 def _normalize_sources(sources: Iterable[str] | None) -> list[str]:
-    active_sources = {"kalshi"}
+    active_sources = {SUPPORTED_PAPER_MARKET_SOURCE}
     if sources is None:
-        return ["kalshi"]
+        return [SUPPORTED_PAPER_MARKET_SOURCE]
     valid = [s for s in sources if s in MARKET_REFERENCE_COLS and s in active_sources]
-    return valid or ["kalshi"]
+    return valid or [SUPPORTED_PAPER_MARKET_SOURCE]
+
+
+def _filter_supported_trade_sources(trades_df: pd.DataFrame) -> pd.DataFrame:
+    if trades_df.empty or "market_source" not in trades_df.columns:
+        return trades_df.copy()
+
+    trades = trades_df.copy()
+    normalized_source = (
+        trades["market_source"]
+        .fillna(SUPPORTED_PAPER_MARKET_SOURCE)
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .replace("", SUPPORTED_PAPER_MARKET_SOURCE)
+    )
+    trades["market_source"] = normalized_source
+
+    filtered = trades.loc[normalized_source == SUPPORTED_PAPER_MARKET_SOURCE].copy()
+    removed = len(trades) - len(filtered)
+    if removed > 0:
+        logger.info("Filtered %d unsupported NCAAB paper trades; keeping %s only", removed, SUPPORTED_PAPER_MARKET_SOURCE)
+    return filtered
 
 
 def _round_money(value: float) -> float:
@@ -84,6 +107,7 @@ def load_ncaab_paper_trades() -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.read_csv(path)
+    df = _filter_supported_trade_sources(df)
     for col in ["placed_at", "game_date", "settled_at", "tipoff_utc"]:
         if col in df.columns:
             df[col] = pd.to_datetime(
@@ -97,6 +121,10 @@ def append_ncaab_paper_trades(new_trades: pd.DataFrame) -> None:
     if new_trades.empty:
         return
 
+    new_trades = _filter_supported_trade_sources(new_trades)
+    if new_trades.empty:
+        return
+
     path = NCAAB_PAPER_TRADES_CSV
     existing = load_ncaab_paper_trades()
 
@@ -106,6 +134,7 @@ def append_ncaab_paper_trades(new_trades: pd.DataFrame) -> None:
         combined = pd.concat([existing, new_trades], ignore_index=True)
         if "trade_id" in combined.columns:
             combined = combined.drop_duplicates(subset=["trade_id"], keep="first")
+    combined = _filter_supported_trade_sources(combined)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(path, index=False)

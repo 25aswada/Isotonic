@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowUpRight, Clock3, Radar, ShieldAlert } from 'lucide-react'
 import { useParams } from 'react-router-dom'
 
-import { MetricCard, EmptyState, ErrorState, LoadingPanel, Pill, Surface } from '../components/ui'
+import { MetricCard, EmptyState, ErrorState, LoadingPanel, Pill, Surface, TeamLogo } from '../components/ui'
 import { getOverview } from '../lib/api'
 import { formatAgeSeconds, formatDateTime, moneySigned, pct } from '../lib/format'
 import { isLeague, leagueLabels, normalizeLeague } from '../lib/navigation'
@@ -27,9 +27,17 @@ function PositionPreview({ position }: { position: PositionRecord }) {
     <div className="preview-row">
       <div className="preview-row__title">
         <strong>{position.contract_team ?? position.bet_side ?? 'Open position'}</strong>
-        <span>
-          {position.away_team} @ {position.home_team}
-        </span>
+        <div className="preview-row__matchup">
+          <span className="preview-row__team">
+            <TeamLogo team={position.away_team as string} size={16} />
+            <span>{position.away_team}</span>
+          </span>
+          <span>@</span>
+          <span className="preview-row__team">
+            <TeamLogo team={position.home_team as string} size={16} />
+            <span>{position.home_team}</span>
+          </span>
+        </div>
       </div>
       <div className="preview-row__meta">
         <span>{pct(position.entry_price ?? position.market_prob, 0)} entry</span>
@@ -43,9 +51,15 @@ function LivePreview({ game }: { game: LiveGame }) {
   return (
     <div className="preview-row">
       <div className="preview-row__teams">
-        <strong style={{ color: teamAccent((game.away_full_name ?? game.away_team) as string) }}>{game.away_team}</strong>
+        <span className="preview-row__team">
+          <TeamLogo team={(game.away_full_name ?? game.away_team) as string} size={16} />
+          <strong style={{ color: teamAccent((game.away_full_name ?? game.away_team) as string) }}>{game.away_team}</strong>
+        </span>
         <span>@</span>
-        <strong style={{ color: teamAccent((game.home_full_name ?? game.home_team) as string) }}>{game.home_team}</strong>
+        <span className="preview-row__team">
+          <TeamLogo team={(game.home_full_name ?? game.home_team) as string} size={16} />
+          <strong style={{ color: teamAccent((game.home_full_name ?? game.home_team) as string) }}>{game.home_team}</strong>
+        </span>
       </div>
       <div className="preview-row__meta">
         <span>{pct(game.live_home_edge ?? game.live_away_edge ?? game.edge)}</span>
@@ -98,14 +112,16 @@ export default function OverviewPage() {
         {data.top_pick ? (
           <div className="hero-matchup">
             <div className="hero-matchup__team">
-              <span>{data.top_pick.away_team}</span>
+              <TeamLogo team={data.top_pick.away_team as string} size={44} />
+              <span className="hero-matchup__label">{data.top_pick.away_team}</span>
               <strong style={{ color: teamAccent(data.top_pick.away_team as string) }}>
                 {pct(data.top_pick.away_win_prob, 0)}
               </strong>
             </div>
             <div className="hero-matchup__divider">at</div>
             <div className="hero-matchup__team">
-              <span>{data.top_pick.home_team}</span>
+              <TeamLogo team={data.top_pick.home_team as string} size={44} />
+              <span className="hero-matchup__label">{data.top_pick.home_team}</span>
               <strong style={{ color: teamAccent(data.top_pick.home_team as string) }}>
                 {pct(data.top_pick.home_win_prob, 0)}
               </strong>
@@ -192,9 +208,17 @@ export default function OverviewPage() {
                 <div className="preview-row" key={`${pick.trade_id ?? pick.game_id ?? index}`}>
                   <div className="preview-row__title">
                     <strong>{pick.bet_team ?? pick.contract_team ?? 'Watch'}</strong>
-                    <span>
-                      {pick.away_team} @ {pick.home_team}
-                    </span>
+                    <div className="preview-row__matchup">
+                      <span className="preview-row__team">
+                        <TeamLogo team={pick.away_team as string} size={16} />
+                        <span>{pick.away_team}</span>
+                      </span>
+                      <span>@</span>
+                      <span className="preview-row__team">
+                        <TeamLogo team={pick.home_team as string} size={16} />
+                        <span>{pick.home_team}</span>
+                      </span>
+                    </div>
                   </div>
                   <div className="preview-row__meta">
                     <span>{pct(pick.best_edge ?? pick.edge)}</span>

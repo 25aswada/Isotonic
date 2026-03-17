@@ -351,6 +351,8 @@ const nbaTeamIds: Record<string, number> = {
 
 export function teamLogoUrl(team: string | null | undefined): string | null {
   if (!team) return null
-  const id = nbaTeamIds[team.toUpperCase().trim()]
-  return id ? `https://cdn.nba.com/logos/nba/${id}/global/L/logo.svg` : null
+  const cleaned = team.toUpperCase().trim()
+  const id = nbaTeamIds[cleaned]
+  if (id) return `https://cdn.nba.com/logos/nba/${id}/global/L/logo.svg`
+  return `/api/ncaab/team-logo?team=${encodeURIComponent(team)}&v=transparent`
 }

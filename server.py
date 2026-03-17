@@ -5,16 +5,20 @@ Open: http://localhost:8000
 """
 from __future__ import annotations
 import asyncio, json, logging, math, os, re, subprocess, sys, threading, time
+from collections import deque
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image, UnidentifiedImageError
 
 ROOT = Path(__file__).parent
 os.chdir(ROOT)
@@ -42,6 +46,27 @@ _UPDATE_JOB_LOCK = threading.Lock()
 LIVE_CACHE_TTL_SECONDS   = 15    # ESPN scoreboard updates every ~10-15s
 PICKS_CACHE_TTL_SECONDS  = 120   # picks change rarely; refresh every ~90s in bg thread
 STATIC_CACHE_TTL_SECONDS = 300   # summary / teams / bracket rarely change
+NCAAB_LOGO_CACHE_TTL_SECONDS = 86400
+
+_NCAAB_LOGO_ALIAS_KEYS = {
+    "uconn": "connecticut",
+    "ncsu": "ncstate",
+    "unc": "northcarolina",
+    "uncw": "uncwilmington",
+    "gmu": "georgemason",
+    "okst": "oklahomast",
+    "okstate": "oklahomast",
+    "sfa": "stephenfaustin",
+    "stjohns": "stjohns",
+    "olemiss": "olemiss",
+    "how": "howard",
+    "wich": "wichitast",
+    "usa": "southalabama",
+    "stmn": "stthomasmn",
+    "uci": "ucirvine",
+    "gonz": "gonzaga",
+    "tlsa": "tulsa",
+}
 
 @app.on_event("startup")
 def _startup():
@@ -1137,6 +1162,157 @@ def _fetch_ncaab_live_payload():
         data["fetched_at"] = datetime.now(timezone.utc).isoformat()
     return data
 
+
+def _normalize_team_key(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _ncaab_school_url_lookup() -> dict[str, str]:
+    import ncaab_config as nc
+
+    lookup: dict[str, str] = {}
+    feature_paths = [
+        getattr(nc, "NCAAB_CURRENT_ALL_TEAM_FEATURES_CSV", None),
+        nc.NCAAB_CURRENT_TEAM_FEATURES_CSV,
+    ]
+
+    for path in feature_paths:
+        if not path or not Path(path).exists():
+            continue
+
+        team_features = pd.read_csv(path)
+        candidate_columns = [column for column in ("TeamName", "ProjectionName", "entry_text", "school_url") if column in team_features.columns]
+        if "school_url" not in candidate_columns:
+            continue
+
+        for row in team_features[candidate_columns].to_dict(orient="records"):
+            school_url = str(row.get("school_url") or "").strip()
+            if not school_url:
+                continue
+            for field in ("TeamName", "ProjectionName", "entry_text"):
+                team_name = str(row.get(field) or "").strip()
+                if not team_name:
+                    continue
+                lookup[_normalize_team_key(team_name)] = school_url
+
+    for alias_key, canonical_key in _NCAAB_LOGO_ALIAS_KEYS.items():
+        school_url = lookup.get(canonical_key)
+        if school_url and alias_key not in lookup:
+            lookup[alias_key] = school_url
+
+    return lookup
+
+
+def _resolve_ncaab_logo_url(team: str) -> str | None:
+    key = _normalize_team_key(team)
+    if not key:
+        return None
+
+    school_url = _ncaab_school_url_lookup().get(key)
+    if not school_url:
+        return None
+
+    try:
+        response = requests.get(
+            school_url,
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("NCAA logo page lookup failed for %s: %s", team, exc)
+        return None
+
+    html = response.text
+    match = re.search(r"https://cdn\.ssref\.net/req/\d+/tlogo/ncaa/[^\"']+\.(?:png|svg)", html, re.IGNORECASE)
+    if match:
+        return match.group(0)
+
+    match = re.search(r"/req/\d+/tlogo/ncaa/[^\"']+\.(?:png|svg)", html, re.IGNORECASE)
+    if match:
+        return f"https://cdn.ssref.net{match.group(0)}"
+
+    logger.warning("No NCAA logo asset found for %s at %s", team, school_url)
+    return None
+
+
+def _pixel_is_edge_background(pixel: tuple[int, int, int, int], cutoff: int = 235) -> bool:
+    r, g, b, a = pixel
+    return a > 0 and r >= cutoff and g >= cutoff and b >= cutoff
+
+
+def _strip_white_logo_background(raw_bytes: bytes) -> bytes:
+    try:
+        image = Image.open(BytesIO(raw_bytes))
+    except UnidentifiedImageError:
+        return raw_bytes
+
+    rgba = image.convert("RGBA")
+    width, height = rgba.size
+    if width == 0 or height == 0:
+        return raw_bytes
+
+    pixels = rgba.load()
+    seen = bytearray(width * height)
+    queue: deque[tuple[int, int]] = deque()
+
+    def enqueue(x: int, y: int) -> None:
+        idx = (y * width) + x
+        if seen[idx]:
+            return
+        if not _pixel_is_edge_background(pixels[x, y]):
+            return
+        seen[idx] = 1
+        queue.append((x, y))
+
+    for x in range(width):
+        enqueue(x, 0)
+        enqueue(x, height - 1)
+    for y in range(height):
+        enqueue(0, y)
+        enqueue(width - 1, y)
+
+    while queue:
+        x, y = queue.popleft()
+        r, g, b, _ = pixels[x, y]
+        pixels[x, y] = (r, g, b, 0)
+
+        if x > 0:
+            enqueue(x - 1, y)
+        if x + 1 < width:
+            enqueue(x + 1, y)
+        if y > 0:
+            enqueue(x, y - 1)
+        if y + 1 < height:
+            enqueue(x, y + 1)
+
+    output = BytesIO()
+    rgba.save(output, format="PNG")
+    return output.getvalue()
+
+
+def _build_ncaab_logo_asset(team: str) -> tuple[bytes, str]:
+    url = _resolve_ncaab_logo_url(team)
+    if not url:
+        raise HTTPException(404, detail=f"No logo found for {team}")
+
+    try:
+        response = requests.get(
+            url,
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("NCAA logo fetch failed for %s: %s", team, exc)
+        raise HTTPException(502, detail=f"Could not fetch logo for {team}") from exc
+
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "svg" in content_type or url.lower().endswith(".svg"):
+        return response.content, "image/svg+xml"
+
+    return _strip_white_logo_background(response.content), "image/png"
+
 @app.get("/api/ncaab/summary")
 async def ncaab_summary():
     data = await asyncio.get_event_loop().run_in_executor(
@@ -1176,6 +1352,23 @@ async def ncaab_teams():
         None, lambda: _cached_call(("api_ncaab_teams",), STATIC_CACHE_TTL_SECONDS, _run)
     )
     return _ok(data)
+
+
+@app.get("/api/ncaab/team-logo")
+async def ncaab_team_logo(team: str):
+    if not team.strip():
+        raise HTTPException(400, detail="team is required")
+
+    key = _normalize_team_key(team)
+    content, media_type = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: _cached_call(
+            ("api_ncaab_team_logo", key),
+            NCAAB_LOGO_CACHE_TTL_SECONDS,
+            lambda: _build_ncaab_logo_asset(team),
+        ),
+    )
+    return Response(content=content, media_type=media_type)
 
 @app.get("/api/ncaab/odds")
 async def ncaab_odds():

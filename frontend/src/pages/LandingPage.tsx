@@ -7,7 +7,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { getOverview, getSystemHealth } from '../lib/api'
 import { formatAgeSeconds, pct } from '../lib/format'
 import { legacyHashMap, leagueLabels } from '../lib/navigation'
-import { Pill, Surface } from '../components/ui'
+import { Pill, Surface, TeamLogo } from '../components/ui'
 import { BrandMark } from '../components/BrandMark'
 
 export default function LandingPage() {
@@ -90,7 +90,10 @@ export default function LandingPage() {
             <div className="landing__league-header">
               <div>
                 <span className="landing__proof-label">{leagueLabels[key]}</span>
-                <h2>{data?.top_pick?.bet_team ?? 'Board ready'}</h2>
+                <div className="landing__league-title">
+                  {data?.top_pick?.bet_team ? <TeamLogo team={data.top_pick.bet_team as string} size={22} /> : null}
+                  <h2>{data?.top_pick?.bet_team ?? 'Board ready'}</h2>
+                </div>
               </div>
               <Pill tone="accent">{data?.live_count ?? 0} live</Pill>
             </div>

@@ -23,6 +23,7 @@ from src.evaluate import kelly_fraction
 from src.market_tracking import enrich_paper_trades_with_clv
 
 logger = logging.getLogger(__name__)
+SUPPORTED_PAPER_MARKET_SOURCE = "kalshi"
 
 MARKET_REFERENCE_COLS = {
     "kalshi": "kalshi_home_prob",
@@ -71,11 +72,33 @@ MARKET_FEE_RATE_COLS = {
 
 
 def _normalize_sources(sources: Iterable[str] | None) -> list[str]:
-    active_sources = {"kalshi"}
+    active_sources = {SUPPORTED_PAPER_MARKET_SOURCE}
     if sources is None:
-        return ["kalshi"]
+        return [SUPPORTED_PAPER_MARKET_SOURCE]
     valid = [s for s in sources if s in MARKET_REFERENCE_COLS and s in active_sources]
-    return valid or ["kalshi"]
+    return valid or [SUPPORTED_PAPER_MARKET_SOURCE]
+
+
+def _filter_supported_trade_sources(trades_df: pd.DataFrame) -> pd.DataFrame:
+    if trades_df.empty or "market_source" not in trades_df.columns:
+        return trades_df.copy()
+
+    trades = trades_df.copy()
+    normalized_source = (
+        trades["market_source"]
+        .fillna(SUPPORTED_PAPER_MARKET_SOURCE)
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .replace("", SUPPORTED_PAPER_MARKET_SOURCE)
+    )
+    trades["market_source"] = normalized_source
+
+    filtered = trades.loc[normalized_source == SUPPORTED_PAPER_MARKET_SOURCE].copy()
+    removed = len(trades) - len(filtered)
+    if removed > 0:
+        logger.info("Filtered %d unsupported paper trades; keeping %s only", removed, SUPPORTED_PAPER_MARKET_SOURCE)
+    return filtered
 
 
 def _round_money(value: float) -> float:
@@ -304,6 +327,7 @@ def load_paper_trades(log_path: str = config.PAPER_TRADES_CSV) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.read_csv(path)
+    df = _filter_supported_trade_sources(df)
     for col in ["placed_at", "game_date", "settled_at", "tipoff_utc", "closing_snapshot_at"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce", utc=("utc" in col or "snapshot" in col))
@@ -695,6 +719,10 @@ def append_paper_trades(
     if new_trades.empty:
         return load_paper_trades(log_path)
 
+    new_trades = _filter_supported_trade_sources(new_trades)
+    if new_trades.empty:
+        return load_paper_trades(log_path)
+
     path = Path(log_path)
     existing = load_paper_trades(log_path)
 
@@ -704,6 +732,7 @@ def append_paper_trades(
         combined = pd.concat([existing, new_trades], ignore_index=True)
         if "trade_id" in combined.columns:
             combined = combined.drop_duplicates(subset=["trade_id"], keep="first")
+    combined = _filter_supported_trade_sources(combined)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(path, index=False)

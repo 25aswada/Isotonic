@@ -15,7 +15,7 @@ import {
 } from 'recharts'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
-import { EmptyState, ErrorState, LoadingPanel, MetricCard, Pill, Surface } from '../components/ui'
+import { EmptyState, ErrorState, LoadingPanel, MetricCard, Pill, Surface, TeamLogo } from '../components/ui'
 import { getAccuracy, getTracker } from '../lib/api'
 import { formatDate, pct, titleCase } from '../lib/format'
 import { buildLeaguePath, isLeague, leagueLabels, normalizeLeague } from '../lib/navigation'
@@ -80,7 +80,17 @@ function TrackerPanel({ data }: { data: TrackerResponse }) {
               <tr key={`${bet.trade_id ?? index}`}>
                 <td>{formatDate(bet.game_date)}</td>
                 <td>
-                  {bet.away_team} @ {bet.home_team}
+                  <div className="table-matchup">
+                    <span className="preview-row__team">
+                      <TeamLogo team={bet.away_team as string} size={16} />
+                      <span>{bet.away_team}</span>
+                    </span>
+                    <span>@</span>
+                    <span className="preview-row__team">
+                      <TeamLogo team={bet.home_team as string} size={16} />
+                      <span>{bet.home_team}</span>
+                    </span>
+                  </div>
                 </td>
                 <td>{bet.contract_team ?? bet.bet_side ?? '—'}</td>
                 <td>{pct(bet.entry_price, 0)}</td>

@@ -25,6 +25,7 @@ data/raw/
 data/processed/
 data/plots/
 data/ncaab/*.csv
+data/ncaab/archives/
 data/ncaab/raw/
 data/ncaab/processed/
 data/ncaab/plots/

@@ -223,6 +223,7 @@ function MatchupSurface({ data, league }: { data: MatchupResponse; league: Leagu
             <>
               <div className="trajectory-legend">
                 <div className="trajectory-legend__item">
+                  <TeamLogo team={teamA} size={18} />
                   <span className="trajectory-legend__line" style={{ background: teamAColor }} />
                   <div>
                     <small>{teamA}</small>
@@ -230,6 +231,7 @@ function MatchupSurface({ data, league }: { data: MatchupResponse; league: Leagu
                   </div>
                 </div>
                 <div className="trajectory-legend__item">
+                  <TeamLogo team={teamB} size={18} />
                   <span className="trajectory-legend__line" style={{ background: teamBColor }} />
                   <div>
                     <small>{teamB}</small>
@@ -350,7 +352,12 @@ function NcaaTeamsTable({ teams }: { teams: NcaabTeamRecord[] }) {
         <tbody>
           {teams.slice(0, 40).map((team) => (
             <tr key={String(team.TeamName ?? team.team_name)}>
-              <td>{team.TeamName ?? team.team_name}</td>
+              <td>
+                <div className="table-team">
+                  <TeamLogo team={String(team.TeamName ?? team.team_name)} size={18} />
+                  <span>{team.TeamName ?? team.team_name}</span>
+                </div>
+              </td>
               <td>{team.Seed ?? team.seed_num ?? '—'}</td>
               <td>{integer(team.elo as number)}</td>
               <td>{pct(team.win_pct as number)}</td>
@@ -442,7 +449,7 @@ function BracketTeamRow({
     <div className={`tournament-match__team ${isWinner ? 'is-winner' : winner ? 'is-loser' : ''}`}>
       <div className="tournament-match__team-main">
         <span className="tournament-match__seed">{seed ?? '—'}</span>
-        <span className="tournament-match__swatch" style={{ background: teamAccent(team) }} />
+        <TeamLogo team={team} size={16} className="tournament-match__logo" />
         <span className="tournament-match__name">{team}</span>
       </div>
       <span className="tournament-match__prob">{winProb != null ? pct0(winProb) : '—'}</span>
@@ -580,13 +587,14 @@ function BracketBoard({ rows }: { rows: BracketRow[] }) {
               <CenterMatch label="National Championship" row={titleRow} seedLookup={seedLookup} tone="title" />
             ) : null}
             <div className="tournament-center__champion">
-              <div className="tournament-center__champion-badge">
-                <Trophy size={18} />
-                <span>Projected champion</span>
-              </div>
-              <strong>{champion}</strong>
-              <p>{championProb != null ? `${pct0(championProb)} in the title matchup.` : 'Current title-game winner.'}</p>
+            <div className="tournament-center__champion-badge">
+              <Trophy size={18} />
+              <span>Projected champion</span>
             </div>
+            <TeamLogo team={champion} size={34} />
+            <strong>{champion}</strong>
+            <p>{championProb != null ? `${pct0(championProb)} in the title matchup.` : 'Current title-game winner.'}</p>
+          </div>
           </div>
 
           <div className="tournament-board__side">

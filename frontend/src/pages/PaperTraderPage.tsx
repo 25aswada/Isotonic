@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams } from 'react-router-dom'
 
-import { Button, EmptyState, ErrorState, MetricCard, Pill, Surface } from '../components/ui'
+import { Button, EmptyState, ErrorState, MetricCard, Pill, Surface, TeamLogo } from '../components/ui'
 import {
   getAutoTradeStatus,
   getPaperCandidates,
@@ -171,11 +171,17 @@ function CandidateCard({
 
       <div className="paper-ticket__teams">
         <div className="paper-ticket__team">
-          <span style={{ color: teamAccent(candidate.away_team as string) }}>{candidate.away_team}</span>
+          <div className="paper-ticket__team-head">
+            <TeamLogo team={candidate.away_team as string} size={24} />
+            <span style={{ color: teamAccent(candidate.away_team as string) }}>{candidate.away_team}</span>
+          </div>
           <small>{candidate.bet_side === 'away' ? 'Target side' : 'Opposing side'}</small>
         </div>
         <div className="paper-ticket__team paper-ticket__team--right">
-          <span style={{ color: teamAccent(candidate.home_team as string) }}>{candidate.home_team}</span>
+          <div className="paper-ticket__team-head paper-ticket__team-head--right">
+            <TeamLogo team={candidate.home_team as string} size={24} />
+            <span style={{ color: teamAccent(candidate.home_team as string) }}>{candidate.home_team}</span>
+          </div>
           <small>{candidate.bet_side === 'home' ? 'Target side' : 'Opposing side'}</small>
         </div>
       </div>
@@ -271,9 +277,17 @@ function OpenPositionsPanel({ items }: { items: PositionRecord[] }) {
                 <div className="position-row__main">
                   <div className="position-row__title">
                     <strong>{item.contract_team ?? item.bet_side ?? 'Position'}</strong>
-                    <span>
-                      {item.away_team} @ {item.home_team}
-                    </span>
+                    <div className="position-row__game">
+                      <span className="preview-row__team">
+                        <TeamLogo team={item.away_team as string} size={16} />
+                        <span>{item.away_team}</span>
+                      </span>
+                      <span>@</span>
+                      <span className="preview-row__team">
+                        <TeamLogo team={item.home_team as string} size={16} />
+                        <span>{item.home_team}</span>
+                      </span>
+                    </div>
                   </div>
                   <div className="position-row__meta">
                     <Pill tone={stage.tone}>{stage.label}</Pill>
@@ -341,7 +355,17 @@ function SettledPositionsPanel({ items }: { items: PositionRecord[] }) {
               <tr key={`${item.trade_id ?? index}`}>
                 <td>{item.placed_at ? formatDateTime(item.placed_at) : '—'}</td>
                 <td>
-                  {item.away_team} @ {item.home_team}
+                  <div className="table-matchup">
+                    <span className="preview-row__team">
+                      <TeamLogo team={item.away_team as string} size={16} />
+                      <span>{item.away_team}</span>
+                    </span>
+                    <span>@</span>
+                    <span className="preview-row__team">
+                      <TeamLogo team={item.home_team as string} size={16} />
+                      <span>{item.home_team}</span>
+                    </span>
+                  </div>
                 </td>
                 <td>{item.contract_team ?? item.bet_side ?? '—'}</td>
                 <td>{titleCase(item.market_source)}</td>
