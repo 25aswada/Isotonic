@@ -1,5 +1,5 @@
 """
-paper_trading.py - Simulated prediction-market trades for Kalshi and Polymarket.
+paper_trading.py - Simulated prediction-market trades for Kalshi.
 
 This module does not place real orders. It logs hypothetical YES positions at the
 current executable ask, then settles them to $1.00 on resolution.
@@ -71,10 +71,11 @@ MARKET_FEE_RATE_COLS = {
 
 
 def _normalize_sources(sources: Iterable[str] | None) -> list[str]:
+    active_sources = {"kalshi"}
     if sources is None:
-        return list(MARKET_REFERENCE_COLS)
-    valid = [s for s in sources if s in MARKET_REFERENCE_COLS]
-    return valid or list(MARKET_REFERENCE_COLS)
+        return ["kalshi"]
+    valid = [s for s in sources if s in MARKET_REFERENCE_COLS and s in active_sources]
+    return valid or ["kalshi"]
 
 
 def _round_money(value: float) -> float:

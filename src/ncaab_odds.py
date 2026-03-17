@@ -718,21 +718,11 @@ def get_all_ncaab_market_odds(
     projected_only: bool = True,
     candidate_names: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Return combined NCAA market prices for projected-field teams or an arbitrary candidate set."""
+    """Return Kalshi NCAA market prices for projected-field teams or an arbitrary candidate set."""
     frames = [
         _prepare_market_frame(
             get_ncaab_kalshi_odds(projected_only=projected_only, candidate_names=candidate_names),
             "kalshi",
-            now=None,
-        ),
-        _prepare_market_frame(
-            get_ncaab_polymarket_odds(projected_only=projected_only, candidate_names=candidate_names),
-            "polymarket",
-            now=None,
-        ),
-        _prepare_market_frame(
-            get_ncaab_sportsbook_odds(projected_only=projected_only, candidate_names=candidate_names),
-            "sportsbook",
             now=None,
         ),
     ]
@@ -746,7 +736,7 @@ def get_all_ncaab_market_odds(
 
     combined["tipoff_utc"] = _coalesce_columns(
         combined,
-        ["sportsbook_tipoff_utc", "kalshi_tipoff_utc", "polymarket_tipoff_utc"],
+        ["kalshi_tipoff_utc"],
     )
     combined["tipoff_utc"] = pd.to_datetime(combined["tipoff_utc"], errors="coerce", utc=True)
 
@@ -754,8 +744,6 @@ def get_all_ncaab_market_odds(
         column
         for column in [
             "kalshi_home_prob",
-            "polymarket_home_prob",
-            "sportsbook_home_prob",
         ]
         if column in combined.columns
     ]
@@ -770,8 +758,6 @@ def get_all_ncaab_market_odds(
             column
             for column in [
                 f"kalshi_{side}_odds_decimal",
-                f"polymarket_{side}_odds_decimal",
-                f"sportsbook_{side}_odds_decimal",
             ]
             if column in combined.columns
         ]
@@ -785,5 +771,5 @@ def get_all_ncaab_market_odds(
     if record_snapshot:
         append_market_snapshot(combined, context=snapshot_context)
 
-    logger.info("Combined NCAA market odds: %d games", len(combined))
+    logger.info("Combined NCAA Kalshi odds: %d games", len(combined))
     return combined

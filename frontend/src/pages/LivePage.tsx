@@ -9,6 +9,7 @@ import { getLive } from '../lib/api'
 import { formatAgeSeconds, pct, pct0 } from '../lib/format'
 import { isLeague, leagueLabels, normalizeLeague } from '../lib/navigation'
 import { teamAccent } from '../lib/teamColor'
+import { TeamLogo } from '../components/ui'
 import { usePersistentState } from '../hooks/usePersistentState'
 import type { League, LiveGame, LivePayload } from '../types'
 
@@ -59,19 +60,19 @@ function LiveCard({
   pinned: boolean
   onTogglePin: () => void
 }) {
+  const pregameHomeProb = game.pregame_home_prob == null ? null : Number(game.pregame_home_prob)
+  const pregameAwayProb = game.pregame_away_prob != null
+    ? Number(game.pregame_away_prob)
+    : pregameHomeProb != null ? 1 - pregameHomeProb : null
   const homeProb = Number(game.live_home_prob ?? game.pregame_home_prob ?? game.home_win_prob ?? 0.5)
   const awayProb = Number(game.live_away_prob ?? game.pregame_away_prob ?? game.away_win_prob ?? 0.5)
   const edgeValue = Number(game.live_home_edge ?? game.live_away_edge ?? game.edge ?? 0)
   const awayKalshi = game.kalshi_away_prob == null ? null : Number(game.kalshi_away_prob)
   const homeKalshi = game.kalshi_home_prob == null ? null : Number(game.kalshi_home_prob)
-  const awayPolymarket = game.polymarket_away_prob == null ? null : Number(game.polymarket_away_prob)
-  const homePolymarket = game.polymarket_home_prob == null ? null : Number(game.polymarket_home_prob)
   const awayModelTone = comparisonTone(awayProb, homeProb)
   const homeModelTone = comparisonTone(homeProb, awayProb)
   const awayKalshiTone = comparisonTone(awayKalshi, homeKalshi)
   const homeKalshiTone = comparisonTone(homeKalshi, awayKalshi)
-  const awayPolymarketTone = comparisonTone(awayPolymarket, homePolymarket)
-  const homePolymarketTone = comparisonTone(homePolymarket, awayPolymarket)
 
   return (
     <Surface className="live-card-modern">
@@ -92,6 +93,7 @@ function LiveCard({
 
       <div className="live-card-modern__scoreboard">
         <div className="live-team">
+          <TeamLogo team={game.away_team as string} size={36} />
           <span style={{ color: teamAccent((game.away_full_name ?? game.away_team) as string) }}>{game.away_team}</span>
           <strong>{game.away_score ?? 0}</strong>
           <small className={`live-prob live-prob--${awayModelTone}`}>{pct0(awayProb)}</small>
@@ -101,6 +103,7 @@ function LiveCard({
           <strong>{game.clock_display ?? '—'}</strong>
         </div>
         <div className="live-team live-team--right">
+          <TeamLogo team={game.home_team as string} size={36} />
           <span style={{ color: teamAccent((game.home_full_name ?? game.home_team) as string) }}>{game.home_team}</span>
           <strong>{game.home_score ?? 0}</strong>
           <small className={`live-prob live-prob--${homeModelTone}`}>{pct0(homeProb)}</small>
@@ -108,20 +111,22 @@ function LiveCard({
       </div>
 
       <div className="live-card-modern__meta">
+        {pregameAwayProb != null && (
+          <div>
+            <span>Pregame model</span>
+            <strong className="live-marketline">
+              <b className={`live-prob live-prob--${comparisonTone(pregameAwayProb, pregameHomeProb)}`}>{pct0(pregameAwayProb)}</b>
+              <i>/</i>
+              <b className={`live-prob live-prob--${comparisonTone(pregameHomeProb, pregameAwayProb)}`}>{pct0(pregameHomeProb)}</b>
+            </strong>
+          </div>
+        )}
         <div>
           <span>Kalshi</span>
           <strong className="live-marketline">
             <b className={`live-prob live-prob--${awayKalshiTone}`}>{pct0(awayKalshi)}</b>
             <i>/</i>
             <b className={`live-prob live-prob--${homeKalshiTone}`}>{pct0(homeKalshi)}</b>
-          </strong>
-        </div>
-        <div>
-          <span>Polymarket</span>
-          <strong className="live-marketline">
-            <b className={`live-prob live-prob--${awayPolymarketTone}`}>{pct0(awayPolymarket)}</b>
-            <i>/</i>
-            <b className={`live-prob live-prob--${homePolymarketTone}`}>{pct0(homePolymarket)}</b>
           </strong>
         </div>
         <div>
@@ -145,7 +150,7 @@ export default function LivePage() {
   const liveQuery = useQuery({
     queryKey: ['live', league],
     queryFn: () => getLive(league),
-    refetchInterval: autoRefresh ? 15_000 : false,
+    refetchInterval: autoRefresh ? 5_000 : false,
   })
 
   useEffect(() => {

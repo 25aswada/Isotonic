@@ -1,5 +1,5 @@
 """
-odds_collection.py — Pull live prices from Kalshi, Polymarket, and The Odds API.
+odds_collection.py — Pull live prices from Kalshi.
 """
 
 from __future__ import annotations
@@ -605,13 +605,12 @@ def get_sportsbook_odds() -> pd.DataFrame:
 
 def get_all_market_odds(record_snapshot: bool = True, snapshot_context: str = "live") -> pd.DataFrame:
     """
-    Fetch prices from Kalshi, Polymarket, and The Odds API and return all of them
-    in a single DataFrame keyed by (home_team, away_team).
+    Fetch prices from Kalshi and return them in a single DataFrame keyed by
+    (home_team, away_team).
 
     Returns one row per game with per-source fields prefixed by source name.
     """
     kalshi = get_kalshi_odds()
-    poly = get_polymarket_odds()
 
     def _prefix_source(df: pd.DataFrame, source: str) -> pd.DataFrame:
         if df.empty:
@@ -626,7 +625,6 @@ def get_all_market_odds(record_snapshot: bool = True, snapshot_context: str = "l
 
     frames = [
         _prefix_source(kalshi, "kalshi"),
-        _prefix_source(poly, "polymarket"),
     ]
     frames = [f for f in frames if not f.empty]
     if not frames:
@@ -639,7 +637,6 @@ def get_all_market_odds(record_snapshot: bool = True, snapshot_context: str = "l
     reference_cols = [
         col for col in [
             "kalshi_home_prob",
-            "polymarket_home_prob",
         ]
         if col in df.columns
     ]
@@ -661,7 +658,7 @@ def get_all_market_odds(record_snapshot: bool = True, snapshot_context: str = "l
         df["away_odds_decimal"] = np.where(df["market_away_implied"] > 0, 1.0 / df["market_away_implied"], np.nan)
         if record_snapshot:
             append_market_snapshot(df, context=snapshot_context)
-    logger.info("Combined market odds: %d games across all sources", len(df))
+    logger.info("Combined market odds: %d Kalshi games", len(df))
     return df
 
 

@@ -277,7 +277,6 @@ function OpenPositionsPanel({ items }: { items: PositionRecord[] }) {
                   </div>
                   <div className="position-row__meta">
                     <Pill tone={stage.tone}>{stage.label}</Pill>
-                    <span>{titleCase(item.market_source)}</span>
                     {item.auto_placed ? <span>Auto placed</span> : <span>Manual</span>}
                     <span>{item.tipoff_utc ? formatDateTime(item.tipoff_utc) : 'Tipoff unknown'}</span>
                   </div>

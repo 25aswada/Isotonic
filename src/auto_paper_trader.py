@@ -36,7 +36,7 @@ _CONTROL: dict = {
     "enabled":      False,
     "mode":         "armed",
     "min_edge":     float(config.AUTO_BET_MIN_EDGE),
-    "sources":      ["kalshi", "polymarket"],
+    "sources":      ["kalshi"],
     "poll_seconds": int(config.AUTO_BET_POLL_SECONDS),
     "active_hours": tuple(config.AUTO_BET_ACTIVE_HOURS),
 }

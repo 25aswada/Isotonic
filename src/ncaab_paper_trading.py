@@ -2,8 +2,8 @@
 ncaab_paper_trading.py - Simulated prediction-market trades for NCAAB (college basketball).
 
 This module mirrors the NBA paper trading system but is tailored for NCAA basketball
-markets on Kalshi and Polymarket. It does not place real orders — it logs hypothetical
-YES positions at the current executable ask, then settles them on resolution.
+markets on Kalshi. It does not place real orders — it logs hypothetical YES
+positions at the current executable ask, then settles them on resolution.
 """
 
 from __future__ import annotations
@@ -57,10 +57,11 @@ MARKET_MARK_PRICE_COLS = {
 
 
 def _normalize_sources(sources: Iterable[str] | None) -> list[str]:
+    active_sources = {"kalshi"}
     if sources is None:
-        return list(MARKET_REFERENCE_COLS)
-    valid = [s for s in sources if s in MARKET_REFERENCE_COLS]
-    return valid or list(MARKET_REFERENCE_COLS)
+        return ["kalshi"]
+    valid = [s for s in sources if s in MARKET_REFERENCE_COLS and s in active_sources]
+    return valid or ["kalshi"]
 
 
 def _round_money(value: float) -> float:
@@ -124,10 +125,9 @@ def build_ncaab_paper_trade_candidates(
     """
     Build candidate paper trades from NCAAB recommendations.
 
-    For each game with bet==True and best_edge >= edge_threshold, create a trade
-    for every requested source (kalshi, polymarket) that has a valid ask price on
-    the recommended side. Size each trade with Quarter-Kelly, capped at 10% of
-    bankroll.
+    For each game with bet==True and best_edge >= edge_threshold, create a Kalshi
+    trade when a valid ask price exists on the recommended side. Size each trade
+    with Quarter-Kelly, capped at 10% of bankroll.
     """
     if recs_df.empty or bankroll <= 0:
         return pd.DataFrame()

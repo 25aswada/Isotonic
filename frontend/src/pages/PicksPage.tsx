@@ -9,6 +9,7 @@ import { getPicks } from '../lib/api'
 import { money, pct, pct0, titleCase } from '../lib/format'
 import { isLeague, leagueLabels, normalizeLeague } from '../lib/navigation'
 import { teamAccent } from '../lib/teamColor'
+import { TeamLogo } from '../components/ui'
 import { usePersistentState } from '../hooks/usePersistentState'
 import type { League, PickRecord } from '../types'
 
@@ -77,6 +78,7 @@ function PickCard({ pick, featured = false }: { pick: PickRecord; featured?: boo
       </div>
       <div className="pick-card__teams">
         <div className="pick-card__team">
+          <TeamLogo team={pick.away_team as string} size={40} />
           <span style={{ color: teamAccent(pick.away_team as string) }}>{pick.away_team}</span>
           <strong className={`pick-card__prob pick-card__prob--${awayModelTone}`}>{pct0(awayDisplay)}</strong>
           <div className="pick-card__marketline">
@@ -93,6 +95,7 @@ function PickCard({ pick, featured = false }: { pick: PickRecord; featured?: boo
           <span>at</span>
         </div>
         <div className="pick-card__team pick-card__team--right">
+          <TeamLogo team={pick.home_team as string} size={40} />
           <span style={{ color: teamAccent(pick.home_team as string) }}>{pick.home_team}</span>
           <strong className={`pick-card__prob pick-card__prob--${homeModelTone}`}>{pct0(homeDisplay)}</strong>
           <div className="pick-card__marketline">
@@ -149,18 +152,19 @@ export default function PicksPage() {
     queryFn: () => getPicks(league, filters.minEdge),
   })
 
-  const filteredPicks = useMemo(() => {
-    const picks = picksQuery.data?.picks ?? []
-    return picks
-      .filter((pick) => !filters.betOnly || Boolean(pick.bet))
-      .filter((pick) => filters.source === 'all' || (pick.best_source ?? pick.market_source) === filters.source)
-      .sort((left, right) => pickSortValue(right, filters.sortBy) - pickSortValue(left, filters.sortBy))
-  }, [filters.betOnly, filters.sortBy, filters.source, picksQuery.data?.picks])
-
   const sources = useMemo(
     () => Array.from(new Set((picksQuery.data?.picks ?? []).map((pick) => pick.best_source ?? pick.market_source).filter(Boolean))),
     [picksQuery.data?.picks],
   )
+  const activeSourceFilter = sources.includes(filters.source) ? filters.source : 'all'
+
+  const filteredPicks = useMemo(() => {
+    const picks = picksQuery.data?.picks ?? []
+    return picks
+      .filter((pick) => !filters.betOnly || Boolean(pick.bet))
+      .filter((pick) => activeSourceFilter === 'all' || (pick.best_source ?? pick.market_source) === activeSourceFilter)
+      .sort((left, right) => pickSortValue(right, filters.sortBy) - pickSortValue(left, filters.sortBy))
+  }, [activeSourceFilter, filters.betOnly, filters.sortBy, picksQuery.data?.picks])
 
   if (picksQuery.isLoading) return <LoadingPanel label="Curating the picks board" />
   if (picksQuery.isError || !picksQuery.data) {
@@ -185,14 +189,18 @@ export default function PicksPage() {
             />
             <span>Bet only</span>
           </label>
-          <select value={filters.source} onChange={(event) => setFilters({ ...filters, source: event.target.value })}>
-            <option value="all">All sources</option>
-            {sources.map((source) => (
-              <option key={source} value={source}>
-                {titleCase(source)}
-              </option>
-            ))}
-          </select>
+          {sources.length > 1 ? (
+            <select value={activeSourceFilter} onChange={(event) => setFilters({ ...filters, source: event.target.value })}>
+              <option value="all">All sources</option>
+              {sources.map((source) => (
+                <option key={source} value={source}>
+                  {titleCase(source)}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <Pill tone="accent">Kalshi only</Pill>
+          )}
         </div>
         <div className="filter-bar__group filter-bar__group--stretch">
           <div className="filter-bar__label">

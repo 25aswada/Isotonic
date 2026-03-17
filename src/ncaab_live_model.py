@@ -81,9 +81,6 @@ def enrich_with_market_odds(live_df: pd.DataFrame, odds_df: pd.DataFrame) -> pd.
         "home_team", "away_team",
         "kalshi_home_prob", "kalshi_away_prob",
         "kalshi_home_ask_prob", "kalshi_away_ask_prob",
-        "polymarket_home_prob", "polymarket_away_prob",
-        "polymarket_home_ask_prob", "polymarket_away_ask_prob",
-        "sportsbook_home_prob", "sportsbook_away_prob",
         "market_home_implied", "market_away_implied",
     ] if c in odds_df.columns]
     if not keep:
@@ -112,15 +109,9 @@ def enrich_with_market_odds(live_df: pd.DataFrame, odds_df: pd.DataFrame) -> pd.
 
     for side in ("home", "away"):
         k = f"kalshi_{side}_prob"
-        p = f"polymarket_{side}_prob"
-        s = f"sportsbook_{side}_prob"
         m = f"market_{side}_implied"
 
         market = pd.to_numeric(merged.get(k, pd.Series(dtype=float)), errors="coerce")
-        if p in merged.columns:
-            market = market.combine_first(pd.to_numeric(merged[p], errors="coerce"))
-        if s in merged.columns:
-            market = market.combine_first(pd.to_numeric(merged[s], errors="coerce"))
         if m in merged.columns:
             market = market.combine_first(pd.to_numeric(merged[m], errors="coerce"))
 

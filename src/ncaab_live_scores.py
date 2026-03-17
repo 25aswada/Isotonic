@@ -108,8 +108,8 @@ def fetch_ncaab_live_games() -> dict[str, list[dict]]:
 
     The scoreboard covers all current men's college basketball games. When both
     teams map to the projected March Madness field, we also attach the current
-    tournament-model probability and any live Kalshi/Polymarket/sportsbook odds
-    that match the projected-field naming.
+    tournament-model probability and any live Kalshi odds that match the
+    projected-field naming.
     """
     response = requests.get(
         ESPN_NCAAB_SCOREBOARD_URL,
@@ -205,8 +205,6 @@ def fetch_ncaab_live_games() -> dict[str, list[dict]]:
             source_time_cols = [
                 column
                 for column in [
-                    "sportsbook_tipoff_utc",
-                    "polymarket_tipoff_utc",
                     "kalshi_tipoff_utc",
                     "tipoff_utc",
                 ]
@@ -216,7 +214,7 @@ def fetch_ncaab_live_games() -> dict[str, list[dict]]:
             any_source_in_window = pd.Series(False, index=odds_df.index)
             all_source_times_missing = pd.Series(True, index=odds_df.index)
 
-            for prefix in ("sportsbook", "polymarket", "kalshi"):
+            for prefix in ("kalshi",):
                 time_col = f"{prefix}_tipoff_utc"
                 if time_col not in odds_df.columns:
                     continue
@@ -245,8 +243,6 @@ def fetch_ncaab_live_games() -> dict[str, list[dict]]:
                 column
                 for column in [
                     "kalshi_home_prob",
-                    "polymarket_home_prob",
-                    "sportsbook_home_prob",
                 ]
                 if column in odds_df.columns
             ]
@@ -261,8 +257,6 @@ def fetch_ncaab_live_games() -> dict[str, list[dict]]:
                     column
                     for column in [
                         f"kalshi_{side}_odds_decimal",
-                        f"polymarket_{side}_odds_decimal",
-                        f"sportsbook_{side}_odds_decimal",
                     ]
                     if column in odds_df.columns
                 ]
@@ -387,10 +381,6 @@ def fetch_ncaab_live_games() -> dict[str, list[dict]]:
             "market_away_implied": None,
             "kalshi_home_prob": None,
             "kalshi_away_prob": None,
-            "polymarket_home_prob": None,
-            "polymarket_away_prob": None,
-            "sportsbook_home_prob": None,
-            "sportsbook_away_prob": None,
             "edge": None,
             "edge_team": None,
         }
@@ -458,10 +448,6 @@ def fetch_ncaab_live_games() -> dict[str, list[dict]]:
         market_cols = [
             "kalshi_home_prob",
             "kalshi_away_prob",
-            "polymarket_home_prob",
-            "polymarket_away_prob",
-            "sportsbook_home_prob",
-            "sportsbook_away_prob",
             "market_home_implied",
             "market_away_implied",
             "market_home_live",

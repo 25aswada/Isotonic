@@ -165,7 +165,6 @@ def _bg_cache_warmer():
                 odds_df = _get_shared_nba_market_odds()
                 if not odds_df.empty:
                     if "kalshi_home_prob" in odds_df and odds_df["kalshi_home_prob"].notna().any(): sources.append("kalshi")
-                    if "polymarket_home_prob" in odds_df and odds_df["polymarket_home_prob"].notna().any(): sources.append("polymarket")
             except Exception: pass
             recs = generate_recommendation_table(predictions, odds_df if not odds_df.empty else None, edge_threshold=0.03)
             records = _df_to_records(recs)
@@ -400,8 +399,6 @@ def _build_nba_picks_payload(edge_threshold: float = 0.03):
         if not odds_df.empty:
             if "kalshi_home_prob" in odds_df and odds_df["kalshi_home_prob"].notna().any():
                 sources.append("kalshi")
-            if "polymarket_home_prob" in odds_df and odds_df["polymarket_home_prob"].notna().any():
-                sources.append("polymarket")
     except Exception:
         pass
 
@@ -661,8 +658,6 @@ async def get_matchup(team_a: str = "BOS", team_b: str = "LAL"):
                     market_odds = {
                         "kalshi_a_prob":      _clean(r.get("kalshi_away_prob" if not flip else "kalshi_home_prob")),
                         "kalshi_b_prob":      _clean(r.get("kalshi_home_prob" if not flip else "kalshi_away_prob")),
-                        "polymarket_a_prob":  _clean(r.get("polymarket_away_prob" if not flip else "polymarket_home_prob")),
-                        "polymarket_b_prob":  _clean(r.get("polymarket_home_prob" if not flip else "polymarket_away_prob")),
                     }
         except Exception: pass
         def _form(team_games, team):
@@ -760,13 +755,16 @@ def _load_trades_with_sync():
 
 
 def _parse_source_list(sources: Any) -> list[str]:
+    allowed_sources = {"kalshi"}
     if isinstance(sources, str):
-        parsed = [part.strip() for part in sources.split(",") if part.strip()]
-        return parsed or ["kalshi", "polymarket"]
+        parsed = [part.strip().lower() for part in sources.split(",") if part.strip()]
+        filtered = [part for part in parsed if part in allowed_sources]
+        return filtered or ["kalshi"]
     if isinstance(sources, list):
-        parsed = [str(part).strip() for part in sources if str(part).strip()]
-        return parsed or ["kalshi", "polymarket"]
-    return ["kalshi", "polymarket"]
+        parsed = [str(part).strip().lower() for part in sources if str(part).strip()]
+        filtered = [part for part in parsed if part in allowed_sources]
+        return filtered or ["kalshi"]
+    return ["kalshi"]
 
 
 def _ensure_candidate_ids(df: pd.DataFrame) -> pd.DataFrame:
@@ -781,7 +779,7 @@ def _ensure_candidate_ids(df: pd.DataFrame) -> pd.DataFrame:
     return candidates
 
 
-def _build_nba_paper_candidates_df(edge_threshold: float = 0.03, sources: Any = "kalshi,polymarket") -> pd.DataFrame:
+def _build_nba_paper_candidates_df(edge_threshold: float = 0.03, sources: Any = "kalshi") -> pd.DataFrame:
     from scripts.daily_predictions import get_todays_features
     from src.odds_collection import get_all_market_odds
     from src.paper_trading import build_paper_trade_candidates, compute_live_paper_bankroll, load_paper_trades
@@ -812,7 +810,7 @@ def _build_nba_paper_candidates_df(edge_threshold: float = 0.03, sources: Any = 
     return _ensure_candidate_ids(candidates)
 
 
-def _build_ncaab_paper_candidates_df(edge_threshold: float = 0.03, sources: Any = "kalshi,polymarket") -> pd.DataFrame:
+def _build_ncaab_paper_candidates_df(edge_threshold: float = 0.03, sources: Any = "kalshi") -> pd.DataFrame:
     from src.ncaab_odds import get_all_ncaab_market_odds
     from src.ncaab_paper_trading import build_ncaab_paper_trade_candidates, compute_ncaab_paper_bankroll, load_ncaab_paper_trades
     from src.ncaab_predict import generate_market_recommendation_table, predict_market_games
@@ -848,7 +846,7 @@ async def paper_state():
     except Exception as e: raise HTTPException(500, detail=str(e))
 
 @app.get("/api/paper-trader/candidates")
-async def paper_candidates(edge_threshold: float = 0.03, sources: str = "kalshi,polymarket"):
+async def paper_candidates(edge_threshold: float = 0.03, sources: str = "kalshi"):
     def _run():
         candidates = _build_nba_paper_candidates_df(edge_threshold=edge_threshold, sources=sources)
         return {"candidates": _df_to_records(candidates)}
@@ -858,7 +856,7 @@ async def paper_candidates(edge_threshold: float = 0.03, sources: str = "kalshi,
         logger.exception("Error in /api/paper-trader/candidates"); raise HTTPException(500, detail=str(e))
 
 @app.post("/api/paper-trader/log-trades")
-async def log_trades(edge_threshold: float = 0.03, sources: str = "kalshi,polymarket"):
+async def log_trades(edge_threshold: float = 0.03, sources: str = "kalshi"):
     def _run():
         from src.paper_trading import append_paper_trades
 
@@ -884,7 +882,7 @@ async def trade_candidates(request: Request):
         raise HTTPException(400, detail="candidate_ids are required")
 
     edge_threshold = float(payload.get("edge_threshold", 0.03))
-    sources = payload.get("sources", "kalshi,polymarket")
+    sources = payload.get("sources", "kalshi")
 
     def _run():
         from src.paper_trading import append_paper_trades
@@ -1205,7 +1203,7 @@ async def ncaab_paper_state():
     except Exception as e: raise HTTPException(500, detail=str(e))
 
 @app.get("/api/ncaab/paper-trader/candidates")
-async def ncaab_paper_candidates(edge_threshold: float = 0.03, sources: str = "kalshi,polymarket"):
+async def ncaab_paper_candidates(edge_threshold: float = 0.03, sources: str = "kalshi"):
     def _run():
         candidates = _build_ncaab_paper_candidates_df(edge_threshold=edge_threshold, sources=sources)
         return {"candidates": _df_to_records(candidates)}
@@ -1215,7 +1213,7 @@ async def ncaab_paper_candidates(edge_threshold: float = 0.03, sources: str = "k
         logger.exception("Error in /api/ncaab/paper-trader/candidates"); raise HTTPException(500, detail=str(e))
 
 @app.post("/api/ncaab/paper-trader/log-trades")
-async def ncaab_log_trades(edge_threshold: float = 0.03, sources: str = "kalshi,polymarket"):
+async def ncaab_log_trades(edge_threshold: float = 0.03, sources: str = "kalshi"):
     def _run():
         from src.ncaab_paper_trading import append_ncaab_paper_trades, load_ncaab_paper_trades
 
@@ -1244,7 +1242,7 @@ async def ncaab_trade_candidates(request: Request):
         raise HTTPException(400, detail="candidate_ids are required")
 
     edge_threshold = float(payload.get("edge_threshold", 0.03))
-    sources = payload.get("sources", "kalshi,polymarket")
+    sources = payload.get("sources", "kalshi")
 
     def _run():
         from src.ncaab_paper_trading import append_ncaab_paper_trades, load_ncaab_paper_trades

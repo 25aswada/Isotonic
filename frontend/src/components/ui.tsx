@@ -201,3 +201,29 @@ export function StatRow({
     </div>
   )
 }
+
+// ── TeamLogo ──────────────────────────────────────────────────────────────────
+import { teamLogoUrl } from '../lib/teamColor'
+
+export function TeamLogo({
+  team,
+  size = 40,
+  className,
+}: {
+  team?: string | null
+  size?: number
+  className?: string
+}) {
+  const url = teamLogoUrl(team)
+  if (!url) return null
+  return (
+    <img
+      src={url}
+      alt={team ?? ''}
+      width={size}
+      height={size}
+      className={clsx('team-logo', className)}
+      onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+    />
+  )
+}

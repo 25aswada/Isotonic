@@ -1,6 +1,19 @@
 import { AnimatePresence, LazyMotion, domAnimation, m, useReducedMotion } from 'framer-motion'
-import { Command, MonitorCog, PanelLeft, Search, ShieldCheck } from 'lucide-react'
+import {
+  Activity,
+  BarChart3,
+  Command,
+  FlaskConical,
+  LayoutGrid,
+  MonitorCog,
+  PanelLeft,
+  Search,
+  ShieldCheck,
+  WalletCards,
+  BadgeDollarSign,
+} from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import type { ComponentType } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 
@@ -19,6 +32,15 @@ import {
 } from '../lib/navigation'
 import { usePersistentState } from '../hooks/usePersistentState'
 import type { League, WorkspaceSection } from '../types'
+
+const sectionIcons = {
+  overview: LayoutGrid,
+  picks: BadgeDollarSign,
+  live: Activity,
+  'paper-trader': WalletCards,
+  research: FlaskConical,
+  history: BarChart3,
+} satisfies Record<WorkspaceSection, ComponentType<{ size?: number; className?: string }>>
 
 function resolvePageTitle(pathname: string) {
   if (pathname === '/app/system') {
@@ -113,20 +135,37 @@ export default function WorkspaceShell() {
           </div>
           <nav className="app-rail__nav" aria-label="Primary">
             {(Object.keys(sections) as WorkspaceSection[]).map((section) => (
-              <NavLink
-                key={section}
-                className={({ isActive }) =>
-                  `app-rail__link ${isActive && currentSection === section ? 'is-active' : ''}`
-                }
-                to={buildLeaguePath(currentLeague, section)}
-              >
-                <span>{sections[section].label}</span>
-                <small>{sections[section].description}</small>
-              </NavLink>
+              (() => {
+                const Icon = sectionIcons[section]
+                return (
+                  <NavLink
+                    key={section}
+                    aria-label={sections[section].label}
+                    title={sections[section].label}
+                    className={({ isActive }) =>
+                      `app-rail__link ${isActive && currentSection === section ? 'is-active' : ''}`
+                    }
+                    to={buildLeaguePath(currentLeague, section)}
+                  >
+                    <span className="app-rail__link-icon" aria-hidden="true">
+                      <Icon size={18} />
+                    </span>
+                    <span className="app-rail__link-copy">
+                      <span>{sections[section].label}</span>
+                      <small>{sections[section].description}</small>
+                    </span>
+                  </NavLink>
+                )
+              })()
             ))}
           </nav>
           <div className="app-rail__footer">
-            <button className="app-rail__utility" onClick={() => navigate('/app/system')}>
+            <button
+              className="app-rail__utility"
+              aria-label="System"
+              title="System"
+              onClick={() => navigate('/app/system')}
+            >
               <MonitorCog size={16} />
               <span>System</span>
             </button>
