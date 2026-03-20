@@ -161,6 +161,10 @@ export default function PicksPage() {
   const filteredPicks = useMemo(() => {
     const picks = picksQuery.data?.picks ?? []
     return picks
+      .filter((pick) => {
+        const hp = Number(pick.home_win_prob ?? pick.pred_home_prob ?? 0.5)
+        return Math.abs(hp - 0.5) > 0.005
+      })
       .filter((pick) => !filters.betOnly || Boolean(pick.bet))
       .filter((pick) => activeSourceFilter === 'all' || (pick.best_source ?? pick.market_source) === activeSourceFilter)
       .sort((left, right) => pickSortValue(right, filters.sortBy) - pickSortValue(left, filters.sortBy))

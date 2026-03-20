@@ -1,16 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" fill="none">
   <defs>
-    <linearGradient id="plusFill" x1="12" x2="52" y1="10" y2="54" gradientUnits="userSpaceOnUse">
+    <linearGradient id="logoFill" x1="19" x2="72" y1="31" y2="70" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#ffffff" />
       <stop offset="55%" stop-color="#f2f3f7" />
       <stop offset="100%" stop-color="#d5d8e0" />
     </linearGradient>
-    <mask id="splitPlus" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
-      <rect width="64" height="64" fill="#000000" />
-      <rect x="7" y="23" width="50" height="18" rx="9" fill="#ffffff" />
-      <rect x="23" y="7" width="18" height="50" rx="9" fill="#ffffff" />
-      <rect x="31" y="6" width="2" height="52" rx="1" fill="#000000" />
-    </mask>
   </defs>
-  <rect x="4" y="4" width="56" height="56" fill="url(#plusFill)" mask="url(#splitPlus)" />
+  <path d="M19 70L40 41L49 54L38 70H19Z" fill="url(#logoFill)" />
+  <path d="M43 40L49 31L72 70H58L43 40Z" fill="url(#logoFill)" />
 </svg>

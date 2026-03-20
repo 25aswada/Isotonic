@@ -4,6 +4,7 @@ export type WorkspaceSection =
   | 'picks'
   | 'live'
   | 'paper-trader'
+  | 'combos'
   | 'research'
   | 'history'
 
@@ -98,6 +99,23 @@ export interface LivePayload {
   final: LiveGame[]
 }
 
+export interface ProbSnapshot {
+  ts: string
+  model_home: number | null
+  model_away: number | null
+  market_home: number | null
+  market_away: number | null
+  home_score: number
+  away_score: number
+  period?: string | number
+  clock?: string
+}
+
+export interface GameDetailResponse {
+  game: LiveGame
+  history: ProbSnapshot[]
+}
+
 export interface OverviewResponse {
   league: League
   available: boolean
@@ -137,6 +155,7 @@ export interface PositionRecord {
   entry_price?: number
   entry_slippage?: number
   current_value?: number
+  current_mark_price?: number
   edge?: number
   kelly_pct?: number
   stake?: number
@@ -176,6 +195,56 @@ export interface PaperCandidatesResponse {
 
 export interface PaperTraderCandidate extends PositionRecord {
   candidate_id: string
+}
+
+export interface ManualTradePreviewResponse {
+  trade: PositionRecord
+}
+
+export interface ComboLegRecord {
+  collection_ticker?: string
+  market_ticker?: string
+  title?: string
+  display?: string
+  market_type?: string
+  team?: string | null
+  team_side?: string | null
+  threshold?: number | null
+  entry_price?: number
+  mark_price?: number
+  market_prob?: number
+  model_prob?: number
+  edge?: number
+}
+
+export interface ComboCollectionRecord {
+  collection_ticker: string
+  title?: string
+  description?: string
+  functional_description?: string
+  home_team?: string
+  away_team?: string
+  tipoff_utc?: string
+  pred_home_score?: number
+  pred_away_score?: number
+  home_win_prob?: number
+  away_win_prob?: number
+  best_edge?: number
+  legs: ComboLegRecord[]
+}
+
+export interface ComboBoardResponse {
+  collections: ComboCollectionRecord[]
+}
+
+export interface ComboState {
+  bankroll: PaperBankroll
+  open_count: number
+  settled_count: number
+}
+
+export interface ComboCandidatesResponse {
+  candidates: PaperTraderCandidate[]
 }
 
 export interface PaperTradeActionResult {
@@ -260,6 +329,15 @@ export interface TeamExplorerResponse {
   win_pct?: number
   elo_history?: Array<{ game_date?: string; elo?: number }>
   rolling_form?: Array<{ game_date?: string; roll_10_pts?: number; roll_10_opp_pts?: number }>
+  seed?: string | number
+  net_rtg?: number
+  avg_margin?: number
+  off_rtg?: number
+  def_rtg?: number
+  last10_win_pct?: number
+  last10_margin?: number
+  median_rank?: number
+  best_rank?: number
 }
 
 export interface MatchupResponse {
@@ -273,6 +351,7 @@ export interface MatchupResponse {
   prediction_source?: string
   pred_score_a?: number
   pred_score_b?: number
+  narrative?: string
   market_odds?: Record<string, number | null>
   stats_a?: Record<string, number | string | null>
   stats_b?: Record<string, number | string | null>
@@ -289,6 +368,8 @@ export interface MatchupResponse {
   seed_baseline_prob?: number
   team_a_seed_edge?: number
   team_b_seed_edge?: number
+  team_a_availability_summary?: string
+  team_b_availability_summary?: string
 }
 
 export interface NcaabSummaryResponse {
@@ -315,9 +396,24 @@ export interface NcaabTeamRecord {
   [key: string]: unknown
 }
 
+export interface AdvancementRow {
+  TeamID: number
+  TeamName: string
+  seed_num: number
+  region: string
+  'Round of 64': number
+  'Round of 32': number
+  'Sweet 16': number
+  'Elite 8': number
+  'Final Four': number
+  Championship: number
+  [key: string]: unknown
+}
+
 export interface BracketResponse {
   available?: boolean
   bracket: Array<Record<string, string | number | null>>
+  advancement?: AdvancementRow[]
 }
 
 export interface TeamListResponse {

@@ -21,6 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 import ncaab_config
 from src.evaluate import kelly_fraction
+from src.paper_trading import (
+    _adjust_exit_price,
+    _build_kalshi_position,
+    _kalshi_fee_dollars,
+    _round_money,
+    _safe_float,
+)
 
 logger = logging.getLogger(__name__)
 SUPPORTED_PAPER_MARKET_SOURCE = "kalshi"
@@ -87,17 +94,6 @@ def _filter_supported_trade_sources(trades_df: pd.DataFrame) -> pd.DataFrame:
     return filtered
 
 
-def _round_money(value: float) -> float:
-    return round(float(value) + 1e-12, 2)
-
-
-def _safe_float(value, default: float = np.nan) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 # ── Load / Save ──────────────────────────────────────────────────────────────
 
 def load_ncaab_paper_trades() -> pd.DataFrame:
@@ -145,6 +141,287 @@ def append_ncaab_paper_trades(new_trades: pd.DataFrame) -> None:
 
 # ── Trade construction ───────────────────────────────────────────────────────
 
+def _iter_live_ncaab_games(payload: dict | None) -> list[dict]:
+    if not isinstance(payload, dict):
+        return []
+
+    games: list[dict] = []
+    for bucket in ("in_progress", "upcoming", "final"):
+        bucket_games = payload.get(bucket, [])
+        if isinstance(bucket_games, list):
+            games.extend(game for game in bucket_games if isinstance(game, dict))
+    return games
+
+
+def _find_live_ncaab_game(payload: dict | None, home_team: str, away_team: str) -> dict | None:
+    for game in _iter_live_ncaab_games(payload):
+        home_variants = {
+            str(value).strip()
+            for value in (game.get("home_team"), game.get("home_full_name"))
+            if str(value or "").strip()
+        }
+        away_variants = {
+            str(value).strip()
+            for value in (game.get("away_team"), game.get("away_full_name"))
+            if str(value or "").strip()
+        }
+        if home_team in home_variants and away_team in away_variants:
+            return game
+        if home_team in away_variants and away_team in home_variants:
+            return game
+    return None
+
+
+def _find_matching_ncaab_market_game(
+    odds_df: pd.DataFrame,
+    home_team: str,
+    away_team: str,
+    live_game: dict | None = None,
+) -> tuple[pd.Series | None, bool]:
+    if odds_df.empty:
+        return None, False
+
+    requested_home_variants = {
+        str(value).strip()
+        for value in (
+            home_team,
+            live_game.get("home_team") if live_game else None,
+            live_game.get("home_full_name") if live_game else None,
+        )
+        if str(value or "").strip()
+    }
+    requested_away_variants = {
+        str(value).strip()
+        for value in (
+            away_team,
+            live_game.get("away_team") if live_game else None,
+            live_game.get("away_full_name") if live_game else None,
+        )
+        if str(value or "").strip()
+    }
+
+    for _, game in odds_df.iterrows():
+        market_home = str(game.get("home_team") or "").strip()
+        market_away = str(game.get("away_team") or "").strip()
+        if not market_home or not market_away:
+            continue
+        if market_home in requested_home_variants and market_away in requested_away_variants:
+            return game, False
+        if market_home in requested_away_variants and market_away in requested_home_variants:
+            return game, True
+
+    return None, False
+
+def build_custom_ncaab_paper_trade(
+    home_team: str,
+    away_team: str,
+    selected_team: str,
+    custom_stake: float,
+    market_source: str = "kalshi",
+    bankroll_snapshot: float | None = None,
+) -> dict | None:
+    """
+    Build a custom NCAAB paper trade for any team in any game with a custom stake amount.
+    
+    Args:
+        home_team: Home team name
+        away_team: Away team name  
+        selected_team: Team to bet on (must be either home_team or away_team)
+        custom_stake: Custom stake amount in dollars
+        market_source: Market source ("kalshi")
+        
+    Returns:
+        Trade dict or None if invalid
+    """
+    if selected_team not in [home_team, away_team]:
+        return None
+    if custom_stake <= 0:
+        return None
+        
+    bet_side = "home" if selected_team == home_team else "away"
+    
+    # Get current market odds
+    try:
+        from src.ncaab_odds import get_all_ncaab_market_odds
+        import requests
+
+        live_payload: dict | None = None
+        live_game: dict | None = None
+        live_candidate_names: list[str] = []
+        try:
+            live_response = requests.get("http://127.0.0.1:8000/api/ncaab/live", timeout=5)
+            live_response.raise_for_status()
+            live_payload = live_response.json()
+            live_game = _find_live_ncaab_game(live_payload, home_team, away_team)
+            for game in _iter_live_ncaab_games(live_payload):
+                for field in ("home_team", "away_team", "home_full_name", "away_full_name"):
+                    value = str(game.get(field) or "").strip()
+                    if value:
+                        live_candidate_names.append(value)
+        except Exception:
+            live_payload = None
+            live_game = None
+
+        odds_df = get_all_ncaab_market_odds(
+            record_snapshot=False,
+            projected_only=False,
+            candidate_names=sorted(set(live_candidate_names)) or None,
+        )
+
+        game, teams_flipped = _find_matching_ncaab_market_game(
+            odds_df,
+            home_team=home_team,
+            away_team=away_team,
+            live_game=live_game,
+        )
+        if game is None:
+            return None
+        
+        # Use market probability as model probability for NCAAB (simplified approach)
+        market_side = "away" if teams_flipped and bet_side == "home" else "home" if teams_flipped and bet_side == "away" else bet_side
+        model_prob = _safe_float(game.get(f"kalshi_{market_side}_prob"))
+        if pd.isna(model_prob) or not (0 < model_prob < 1):
+            return None
+            
+        # Get the correct price column
+        price_col = MARKET_EXECUTION_PRICE_COLS[market_source][market_side]
+        entry_price = _safe_float(game.get(price_col))
+        if not (0 < entry_price < 1):
+            return None
+            
+        # Get reference probability
+        ref_col = MARKET_REFERENCE_COLS[market_source]
+        ref_home_prob = _safe_float(game.get(ref_col))
+        if pd.notna(ref_home_prob):
+            market_prob = ref_home_prob if market_side == "home" else 1.0 - ref_home_prob
+        else:
+            market_prob = entry_price
+            
+        position = _build_kalshi_position(entry_price, custom_stake)
+        if position is None:
+            return None
+
+        stake = float(position["cash_outlay"])
+        entry_decimal = position["payout_if_win"] / stake
+        break_even_prob = 1.0 / entry_decimal
+        edge = model_prob - break_even_prob
+        kelly_pct = max(kelly_fraction(model_prob, entry_decimal) * config.KELLY_FRACTION, 0.0)
+        expected_value_per_dollar = (model_prob * entry_decimal) - 1.0
+        expected_profit = float(expected_value_per_dollar * stake)
+        
+        # Build trade record
+        game_date = pd.to_datetime(game.get("tipoff_utc"), errors="coerce")
+        game_id = f"{away_team}@{home_team}_{game_date.date() if pd.notna(game_date) else 'unknown'}"
+        trade_id = f"custom_ncaab_{game_date.date().isoformat() if pd.notna(game_date) else pd.Timestamp.now().date().isoformat()}_{game_id}_{market_source}_{bet_side}"
+        bankroll_value = float(bankroll_snapshot if bankroll_snapshot is not None else custom_stake)
+        
+        return {
+            "trade_id": trade_id,
+            "placed_at": pd.Timestamp.now(),
+            "game_id": game_id,
+            "game_date": game_date,
+            "tipoff_utc": game.get("tipoff_utc"),
+            "market_source": market_source,
+            "home_team": home_team,
+            "away_team": away_team,
+            "bet_side": bet_side,
+            "contract_team": selected_team,
+            "model_prob": float(model_prob),
+            "market_prob": float(market_prob),
+            "quoted_entry_price": float(entry_price),
+            "entry_price": float(entry_price),
+            "entry_slippage": 0.0,
+            "entry_decimal": float(entry_decimal),
+            "edge": float(edge),
+            "kelly_pct": float(max(kelly_pct, 0.0)),
+            "stake": float(stake),
+            "status": "open",
+            "bankroll_snapshot": bankroll_value,
+            "expected_profit": float(expected_profit),
+            "cash_after_trade": _round_money(max(bankroll_value - stake, 0.0)),
+            "break_even_prob": float(break_even_prob),
+            "expected_value_per_dollar": float(expected_value_per_dollar),
+            **position,
+        }
+        
+    except Exception:
+        return None
+
+
+def mark_open_ncaab_trades_to_market(
+    trades_df: pd.DataFrame,
+    live_odds_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if trades_df.empty:
+        return trades_df.copy()
+
+    marked = trades_df.copy()
+    marked["last_marked_at"] = pd.Timestamp.now()
+
+    if live_odds_df is None or live_odds_df.empty:
+        live_lookup: dict[tuple[str, str], dict] = {}
+    else:
+        live_lookup = (
+            live_odds_df.drop_duplicates(subset=["home_team", "away_team"])
+            .set_index(["home_team", "away_team"])
+            .to_dict("index")
+        )
+
+    if "status" in marked.columns:
+        open_mask = marked["status"].fillna("open") == "open"
+    else:
+        open_mask = pd.Series(True, index=marked.index)
+
+    for idx, trade_row in marked.loc[open_mask].iterrows():
+        live_row = live_lookup.get((trade_row.get("home_team"), trade_row.get("away_team")))
+        side = str(trade_row.get("bet_side", "home") or "home")
+        if live_row is not None:
+            bid_col = f"kalshi_{side}_bid_prob"
+            ask_col = f"kalshi_{side}_ask_prob"
+            mark_price = _safe_float(live_row.get(bid_col))
+            if not (0 < mark_price < 1):
+                mark_price = _safe_float(live_row.get(f"kalshi_{side}_prob"))
+            spread = _safe_float(live_row.get(f"kalshi_{side}_spread_prob"))
+            if pd.isna(spread):
+                ask_price = _safe_float(live_row.get(ask_col))
+                if 0 < mark_price < ask_price:
+                    spread = ask_price - mark_price
+            mark_basis = "bid" if 0 < _safe_float(live_row.get(bid_col)) < 1 else "reference"
+        else:
+            mark_price = _safe_float(trade_row.get("entry_price"))
+            spread = np.nan
+            mark_basis = "entry"
+
+        quantity = _safe_float(trade_row.get("payout_if_win"))
+        if pd.isna(quantity) or quantity <= 0:
+            contracts = _safe_float(trade_row.get("contracts"))
+            if contracts > 0:
+                quantity = contracts
+        if pd.isna(quantity) or quantity <= 0:
+            stake = _safe_float(trade_row.get("stake"))
+            entry_price = _safe_float(trade_row.get("entry_price"))
+            if stake > 0 and 0 < entry_price < 1:
+                quantity = stake / entry_price
+        if pd.isna(quantity) or quantity <= 0 or not (0 < mark_price < 1):
+            continue
+
+        effective_exit_price, _ = _adjust_exit_price(mark_price, spread=spread)
+        gross_value = quantity * effective_exit_price
+        exit_fee = _kalshi_fee_dollars(int(round(quantity)), effective_exit_price)
+        current_value = max(gross_value - exit_fee, 0.0)
+        stake = _safe_float(trade_row.get("stake"))
+        unrealized_pnl = current_value - stake if pd.notna(stake) else np.nan
+
+        marked.loc[idx, "current_mark_price"] = float(mark_price)
+        marked.loc[idx, "mark_basis"] = mark_basis
+        marked.loc[idx, "current_mark_spread"] = spread
+        marked.loc[idx, "current_exit_fee"] = _round_money(exit_fee)
+        marked.loc[idx, "current_value"] = _round_money(current_value)
+        marked.loc[idx, "unrealized_pnl"] = _round_money(unrealized_pnl) if pd.notna(unrealized_pnl) else np.nan
+
+    return marked
+
+
 def build_ncaab_paper_trade_candidates(
     recs_df: pd.DataFrame,
     bankroll: float,
@@ -154,9 +431,9 @@ def build_ncaab_paper_trade_candidates(
     """
     Build candidate paper trades from NCAAB recommendations.
 
-    For each game with bet==True and best_edge >= edge_threshold, create a Kalshi
+    For each game with a valid market price, create a Kalshi
     trade when a valid ask price exists on the recommended side. Size each trade
-    with Quarter-Kelly, capped at 10% of bankroll.
+    with Quarter-Kelly when available, otherwise fall back to a minimum manual stake.
     """
     if recs_df.empty or bankroll <= 0:
         return pd.DataFrame()
@@ -166,13 +443,6 @@ def build_ncaab_paper_trade_candidates(
     candidates: list[dict] = []
 
     for _, rec in recs_df.iterrows():
-        # Only consider rows flagged as bets with sufficient edge
-        if not rec.get("bet", False):
-            continue
-        best_edge = _safe_float(rec.get("best_edge"), default=0.0)
-        if best_edge < edge_threshold:
-            continue
-
         home_team = rec.get("home_team")
         away_team = rec.get("away_team")
         bet_side = rec.get("bet_side", "home")
@@ -206,10 +476,9 @@ def build_ncaab_paper_trade_candidates(
             full_kelly = kelly_fraction(model_prob, entry_decimal)
             kelly_pct = full_kelly * config.KELLY_FRACTION
             kelly_pct = min(kelly_pct, max_stake_pct)
-            if kelly_pct < getattr(config, "MIN_KELLY_BET", 0.005):
-                continue
+            effective_stake_pct = max(kelly_pct, getattr(config, "MIN_KELLY_BET", 0.005))
 
-            stake = _round_money(bankroll * kelly_pct)
+            stake = _round_money(bankroll * effective_stake_pct)
             max_stake = _round_money(bankroll * max_stake_pct)
             stake = min(stake, max_stake)
             if stake <= 0:
@@ -244,10 +513,12 @@ def build_ncaab_paper_trade_candidates(
                 "entry_price": float(entry_price),
                 "entry_decimal": float(entry_decimal),
                 "edge": float(edge),
-                "kelly_pct": float(kelly_pct),
+                "kelly_pct": float(max(kelly_pct, 0.0)),
                 "stake": float(stake),
                 "status": "open",
                 "bankroll_snapshot": float(bankroll),
+                "expected_profit": float((model_prob * (1.0 / entry_price) - 1.0) * stake),
+                "cash_after_trade": _round_money(bankroll - stake),
             })
 
     if not candidates:

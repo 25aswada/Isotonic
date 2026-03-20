@@ -24,6 +24,10 @@ export const sections: Record<WorkspaceSection, SectionMeta> = {
     dockLabel: 'Paper',
     description: 'Simulated trading, positions, and auto-trade controls.',
   },
+  combos: {
+    label: 'Combos',
+    description: 'Kalshi combo builder, ranked ideas, and combo positions.',
+  },
   research: {
     label: 'Research',
     description: 'Matchup tools, explorers, and supporting context.',
@@ -44,6 +48,7 @@ export const legacyHashMap: Record<string, string> = {
   live: '/app/nba/live',
   matchup: '/app/nba/research?tab=matchup',
   paper: '/app/nba/paper-trader',
+  combos: '/app/nba/combos',
   accuracy: '/app/nba/history?tab=accuracy',
   team: '/app/nba/research?tab=teams',
   tracker: '/app/nba/history?tab=tracker',
@@ -52,6 +57,7 @@ export const legacyHashMap: Record<string, string> = {
   'nc-live': '/app/ncaab/live',
   'nc-matchup': '/app/ncaab/research?tab=matchup',
   'nc-trader': '/app/ncaab/paper-trader',
+  'nc-combos': '/app/ncaab/combos',
   'nc-accuracy': '/app/ncaab/history?tab=accuracy',
   'nc-teams': '/app/ncaab/research?tab=teams',
   'nc-tracker': '/app/ncaab/history?tab=tracker',
@@ -67,7 +73,7 @@ export function buildLeaguePath(league: League, section: WorkspaceSection) {
 }
 
 export function getSectionFromPath(pathname: string): WorkspaceSection | null {
-  const match = pathname.match(/\/(overview|picks|live|paper-trader|research|history)$/)
+  const match = pathname.match(/\/(overview|picks|live|paper-trader|combos|research|history)$/)
   return (match?.[1] as WorkspaceSection | undefined) ?? null
 }
 

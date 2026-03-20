@@ -32,12 +32,18 @@ NON_FEATURE_COLS = {
     "team_a_name",
     "team_b_name",
     "team_a_win",
+    "is_tournament",
+    "sample_weight_multiplier",
 }
 
 
 def _clip_probs(probs: np.ndarray) -> np.ndarray:
-    """Keep calibrated probabilities inside a numerically safe range."""
-    return np.clip(np.asarray(probs, dtype=float), 1e-6, 1.0 - 1e-6)
+    """Keep calibrated probabilities inside a safe range.
+
+    Conservative clipping prevents extreme confidence that drives
+    catastrophic log-loss on upsets (e.g., 16-over-1).
+    """
+    return np.clip(np.asarray(probs, dtype=float), 0.04, 0.96)
 
 
 class CalibratedNCAABModel:
@@ -165,6 +171,12 @@ def temporal_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
     train = df[df["Season"].isin(ncaab_config.TRAIN_SEASONS)].copy()
     val = df[df["Season"].isin(ncaab_config.VAL_SEASONS)].copy()
     test = df[df["Season"].isin(ncaab_config.TEST_SEASONS)].copy()
+
+    if "is_tournament" in test.columns:
+        test_tourney = test[test["is_tournament"] == 1].copy()
+        if not test_tourney.empty:
+            test = test_tourney
+
     logger.info("NCAA split sizes - train: %d, val: %d, test: %d", len(train), len(val), len(test))
     return train, val, test
 
@@ -227,7 +239,11 @@ def compute_season_sample_weights(df: pd.DataFrame) -> np.ndarray:
     """Exponentially up-weight more recent NCAA tournament seasons."""
     season_year = pd.to_numeric(df["Season"], errors="coerce").fillna(0).astype(int)
     min_year = int(season_year.min()) if len(season_year) else 0
-    return np.exp(ncaab_config.RECENCY_DECAY * (season_year - min_year)).astype(float)
+    base = np.exp(ncaab_config.RECENCY_DECAY * (season_year - min_year)).astype(float)
+    if "sample_weight_multiplier" not in df.columns:
+        return base
+    multiplier = pd.to_numeric(df["sample_weight_multiplier"], errors="coerce").fillna(1.0).to_numpy(dtype=float)
+    return base * multiplier
 
 
 def tune_hyperparameters(
@@ -338,60 +354,52 @@ def load_model() -> tuple[CalibratedNCAABModel | EnsembleCalibratedNCAABModel, l
     return model, feature_cols, fill_values
 
 
-def run_training_pipeline(
-    df: pd.DataFrame,
-    tune: bool = False,
-    n_trials: int = 50,
-) -> tuple[CalibratedNCAABModel | EnsembleCalibratedNCAABModel, list[str], pd.DataFrame, np.ndarray]:
-    """Train, calibrate, and save the NCAA model."""
-    feature_cols = get_feature_columns(df)
-    train_df, val_df, test_df = temporal_split(df)
-    fill_values = compute_fill_values(train_df, feature_cols)
-    linear_feature_cols = get_linear_feature_columns(feature_cols)
+def _train_and_blend(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    feature_cols: list[str],
+    linear_feature_cols: list[str],
+    params: dict | None = None,
+) -> CalibratedNCAABModel | EnsembleCalibratedNCAABModel:
+    """Internal helper: train XGB + optional linear blend on given splits."""
     sample_weight = compute_season_sample_weights(train_df)
-
+    fill_values = compute_fill_values(train_df, feature_cols)
     X_train, y_train = prepare_xy(train_df, feature_cols, fill_values=fill_values)
     X_val, y_val = prepare_xy(val_df, feature_cols, fill_values=fill_values)
-    X_test, _ = prepare_xy(test_df, feature_cols, fill_values=fill_values)
 
-    best_params = tune_hyperparameters(X_train, y_train, n_trials=n_trials) if tune else ncaab_config.XGB_PARAMS.copy()
-    raw_model = train_xgb(
-        X_train,
-        y_train,
-        X_val,
-        y_val,
-        params=best_params,
-        sample_weight=sample_weight,
-    )
-    val_raw_probs = raw_model.predict_proba(X_val)[:, 1]
-    calibrator = calibrate_probabilities(val_raw_probs, y_val)
+    best_params = params if params is not None else ncaab_config.XGB_PARAMS.copy()
+    raw_model = train_xgb(X_train, y_train, X_val, y_val, params=best_params, sample_weight=sample_weight)
 
+    # Use tournament games for calibration only when the set is large enough
+    # for isotonic regression to be stable (at least 200 samples).
+    val_cal = val_df
+    if "is_tournament" in val_df.columns:
+        tourney_val = val_df[val_df["is_tournament"] == 1]
+        if len(tourney_val) >= 200:
+            val_cal = tourney_val
+    X_val_cal, y_val_cal = prepare_xy(val_cal, feature_cols, fill_values=fill_values)
+
+    val_raw_probs = raw_model.predict_proba(X_val_cal)[:, 1]
+    calibrator = calibrate_probabilities(val_raw_probs, y_val_cal)
     calibrated_model = CalibratedNCAABModel(raw_model, calibrator)
-    selected_model: CalibratedNCAABModel | EnsembleCalibratedNCAABModel = calibrated_model
 
+    selected: CalibratedNCAABModel | EnsembleCalibratedNCAABModel = calibrated_model
     if ncaab_config.ENABLE_LINEAR_BLEND:
-        linear_model = train_linear_model(
-            X_train,
-            y_train,
-            linear_feature_cols,
-            sample_weight=sample_weight,
-        )
+        linear_model = train_linear_model(X_train, y_train, linear_feature_cols, sample_weight=sample_weight)
         if linear_model is not None:
-            val_linear_raw = linear_model.predict_proba(X_val[linear_feature_cols])[:, 1]
-            linear_calibrator = calibrate_probabilities(val_linear_raw, y_val)
+            val_linear_raw = linear_model.predict_proba(X_val_cal[linear_feature_cols])[:, 1]
+            linear_calibrator = calibrate_probabilities(val_linear_raw, y_val_cal)
             val_linear_probs = linear_calibrator.predict(val_linear_raw)
             blend_weight, blend_logloss = select_blend_weight(
-                y_val,
-                calibrated_model.predict_proba(X_val)[:, 1],
+                y_val_cal,
+                calibrated_model.predict_proba(X_val_cal)[:, 1],
                 val_linear_probs,
             )
             logger.info(
-                "Selected NCAA ensemble weight: %.2f XGBoost / %.2f linear (val log loss %.4f)",
-                blend_weight,
-                1.0 - blend_weight,
-                blend_logloss,
+                "Ensemble weight: %.2f XGB / %.2f linear (val log loss %.4f)",
+                blend_weight, 1.0 - blend_weight, blend_logloss,
             )
-            selected_model = EnsembleCalibratedNCAABModel(
+            selected = EnsembleCalibratedNCAABModel(
                 xgb_model=raw_model,
                 xgb_calibrator=calibrator,
                 linear_model=linear_model,
@@ -400,8 +408,130 @@ def run_training_pipeline(
                 linear_feature_cols=linear_feature_cols,
                 xgb_weight=blend_weight,
             )
+    return selected
 
+
+def walkforward_cv(
+    df: pd.DataFrame,
+    test_years: list[int] | None = None,
+) -> list[dict]:
+    """Evaluate the model via walk-forward cross-validation.
+
+    For each *test_year*, train on all prior seasons (skipping 2020 which
+    had no tournament), validate on the season immediately before, and test
+    on tournament games from *test_year*.  Returns per-year metrics.
+    """
+    from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
+
+    if test_years is None:
+        test_years = ncaab_config.WALKFORWARD_TEST_YEARS
+
+    feature_cols = get_feature_columns(df)
+    linear_feature_cols = get_linear_feature_columns(feature_cols)
+    results: list[dict] = []
+
+    for test_year in test_years:
+        # Test: tournament games from test_year
+        test_mask = (df["Season"] == test_year)
+        if "is_tournament" in df.columns:
+            tourney_mask = df["is_tournament"] == 1
+            test_cand = df[test_mask & tourney_mask]
+            if test_cand.empty:
+                test_cand = df[test_mask]
+        else:
+            test_cand = df[test_mask]
+        if test_cand.empty:
+            logger.warning("No test data for %d, skipping", test_year)
+            continue
+
+        # Val: previous season (skip 2020)
+        val_year = test_year - 1
+        if val_year == 2020:
+            val_year = 2019
+        val_mask = df["Season"] == val_year
+        val_df = df[val_mask]
+        if val_df.empty:
+            logger.warning("No val data for %d (val year %d), skipping", test_year, val_year)
+            continue
+
+        # Train: all years before val_year, skip 2020
+        train_mask = (df["Season"] < val_year) & (df["Season"] != 2020)
+        train_df = df[train_mask]
+        if len(train_df) < 100:
+            logger.warning("Insufficient training data for test year %d, skipping", test_year)
+            continue
+
+        fill_values = compute_fill_values(train_df, feature_cols)
+        model = _train_and_blend(train_df, val_df, feature_cols, linear_feature_cols)
+
+        X_test, y_test = prepare_xy(test_cand, feature_cols, fill_values=fill_values)
+        probs = model.predict_proba(X_test)[:, 1]
+        preds = (probs >= 0.5).astype(int)
+
+        year_metrics = {
+            "year": test_year,
+            "n_games": len(y_test),
+            "accuracy": float(accuracy_score(y_test, preds)),
+            "log_loss": float(log_loss(y_test, _clip_probs(probs))),
+            "brier": float(brier_score_loss(y_test, probs)),
+        }
+        try:
+            year_metrics["auc"] = float(roc_auc_score(y_test, probs))
+        except ValueError:
+            year_metrics["auc"] = float("nan")
+
+        logger.info(
+            "WF-CV %d: acc=%.3f  auc=%.3f  logloss=%.3f  brier=%.3f  (n=%d)",
+            test_year,
+            year_metrics["accuracy"],
+            year_metrics.get("auc", 0),
+            year_metrics["log_loss"],
+            year_metrics["brier"],
+            year_metrics["n_games"],
+        )
+        results.append(year_metrics)
+
+    if results:
+        mean_acc = np.mean([r["accuracy"] for r in results])
+        mean_ll = np.mean([r["log_loss"] for r in results])
+        mean_brier = np.mean([r["brier"] for r in results])
+        aucs = [r["auc"] for r in results if not np.isnan(r.get("auc", float("nan")))]
+        mean_auc = np.mean(aucs) if aucs else float("nan")
+        logger.info(
+            "WF-CV MEAN: acc=%.3f  auc=%.3f  logloss=%.3f  brier=%.3f  (%d years)",
+            mean_acc, mean_auc, mean_ll, mean_brier, len(results),
+        )
+
+    return results
+
+
+def run_training_pipeline(
+    df: pd.DataFrame,
+    tune: bool = False,
+    n_trials: int = 50,
+) -> tuple[CalibratedNCAABModel | EnsembleCalibratedNCAABModel, list[str], pd.DataFrame, np.ndarray]:
+    """Train, calibrate, and save the NCAA model."""
+    feature_cols = get_feature_columns(df)
+    train_df, val_df, test_df = temporal_split(df)
+    if train_df.empty:
+        raise ValueError("No NCAA training rows found for the configured train seasons.")
+    if val_df.empty:
+        raise ValueError("No NCAA validation rows found for the configured validation seasons.")
+    if test_df.empty:
+        raise ValueError("No NCAA test rows found for the configured test seasons.")
+    fill_values = compute_fill_values(train_df, feature_cols)
+    linear_feature_cols = get_linear_feature_columns(feature_cols)
+
+    X_train, y_train = prepare_xy(train_df, feature_cols, fill_values=fill_values)
+
+    best_params = tune_hyperparameters(X_train, y_train, n_trials=n_trials) if tune else ncaab_config.XGB_PARAMS.copy()
+    selected_model = _train_and_blend(train_df, val_df, feature_cols, linear_feature_cols, params=best_params)
+
+    X_test, _ = prepare_xy(test_df, feature_cols, fill_values=fill_values)
     test_probs = selected_model.predict_proba(X_test)[:, 1]
+
+    # Extract raw XGB model for artifact saving
+    raw_model = selected_model.xgb_model if hasattr(selected_model, "xgb_model") else selected_model.model
     save_model(raw_model, selected_model, feature_cols, fill_values)
     return selected_model, feature_cols, test_df, test_probs
 

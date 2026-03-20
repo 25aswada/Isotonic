@@ -7,7 +7,9 @@ import WorkspaceShell from './pages/WorkspaceShell'
 import OverviewPage from './pages/OverviewPage'
 import PicksPage from './pages/PicksPage'
 import LivePage from './pages/LivePage'
+import LiveGameDetailPage from './pages/LiveGameDetailPage'
 import PaperTraderPage from './pages/PaperTraderPage'
+import CombosPage from './pages/CombosPage'
 import ResearchPage from './pages/ResearchPage'
 import SystemPage from './pages/SystemPage'
 import HistoryPage from './pages/HistoryPage'
@@ -55,7 +57,9 @@ export const router = createBrowserRouter([
           { path: 'overview', element: wrap(<OverviewPage />) },
           { path: 'picks', element: wrap(<PicksPage />) },
           { path: 'live', element: wrap(<LivePage />) },
+          { path: 'live/:gameId', element: wrap(<LiveGameDetailPage />) },
           { path: 'paper-trader', element: wrap(<PaperTraderPage />) },
+          { path: 'combos', element: wrap(<CombosPage />) },
           { path: 'research', element: wrap(<ResearchPage />) },
           { path: 'history', element: wrap(<HistoryPage />) },
         ],

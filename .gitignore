@@ -26,6 +26,7 @@ data/processed/
 data/plots/
 data/ncaab/*.csv
 data/ncaab/archives/
+data/ncaab/logo_cache/
 data/ncaab/raw/
 data/ncaab/processed/
 data/ncaab/plots/

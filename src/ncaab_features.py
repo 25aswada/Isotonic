@@ -32,6 +32,18 @@ TEAM_PROFILE_FEATURES = [
     "last10_margin",
     "median_rank",
     "best_rank",
+    # ── New features ──
+    "pace",
+    "fg3_rate",
+    "ft_pct",
+    "ast_rate",
+    "stl_rate",
+    "blk_rate",
+    "dreb_pct",
+    "opp_tov_rate",
+    "std_margin",
+    "avg_opp_win_pct",
+    "avg_opp_elo",
 ]
 
 
@@ -41,6 +53,17 @@ def parse_seed_number(seed: str) -> int:
     if not match:
         raise ValueError(f"Could not parse numeric seed from {seed!r}")
     return int(match.group(1))
+
+
+def infer_seed_from_rank(rank_value: float | int | None) -> int:
+    """Map an overall rank onto an approximate seed line."""
+    try:
+        numeric = float(rank_value)
+    except (TypeError, ValueError):
+        return 16
+    if np.isnan(numeric):
+        return 16
+    return int(np.clip(np.ceil(max(numeric, 1.0) / 4.0), 1, 16))
 
 
 def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
@@ -156,17 +179,44 @@ def build_team_game_rows(regular_season_results: pd.DataFrame) -> pd.DataFrame:
     team_games["off_rtg"] = 100.0 * _safe_divide(team_games["score_for"], possessions)
     team_games["def_rtg"] = 100.0 * _safe_divide(team_games["score_against"], possessions)
     team_games["net_rtg"] = team_games["off_rtg"] - team_games["def_rtg"]
+
+    # ── New per-game features ──
+    team_games["fg3_rate"] = _safe_divide(team_games["FGA3"], team_games["FGA"])
+    team_games["ft_pct"] = _safe_divide(team_games["FTM"], team_games["FTA"])
+    team_games["ast_rate"] = _safe_divide(team_games["Ast"], team_games["FGM"])
+    team_games["stl_rate"] = _safe_divide(team_games["Stl"], possessions)
+    team_games["blk_rate"] = _safe_divide(team_games["Blk"], possessions)
+    team_games["dreb_pct"] = _safe_divide(team_games["DR"], team_games["DR"] + team_games["opp_OR"])
+    team_games["opp_tov_rate"] = _safe_divide(
+        team_games["opp_TO"],
+        team_games["opp_FGA"] + 0.44 * team_games["opp_FTA"] + team_games["opp_TO"],
+    )
+
     return team_games
 
 
-def compute_pre_tournament_elo(regular_season_results: pd.DataFrame) -> pd.DataFrame:
-    """Compute end-of-regular-season Elo ratings for each team and season."""
+def compute_pre_tournament_elo(
+    regular_season_results: pd.DataFrame,
+    carryover: float = 0.33,
+) -> pd.DataFrame:
+    """Compute end-of-regular-season Elo ratings with season-to-season carryover.
+
+    At the start of each season, each team's Elo is reverted toward 1500 by
+    ``(1 - carryover)`` of the prior deviation.  This captures the idea that
+    strong programs retain some quality year-over-year despite roster turnover.
+    """
     elo_rows: list[dict[str, float | int]] = []
-    for season, games in regular_season_results.sort_values(["Season", "DayNum"]).groupby("Season"):
+    prev_ratings: dict[int, float] = {}
+
+    sorted_results = regular_season_results.sort_values(["Season", "DayNum"])
+    for season, games in sorted_results.groupby("Season", sort=True):
         ratings: dict[int, float] = {}
 
         def rating(team_id: int) -> float:
-            return ratings.get(team_id, 1500.0)
+            if team_id not in ratings:
+                prior = prev_ratings.get(team_id, 1500.0)
+                ratings[team_id] = 1500.0 + carryover * (prior - 1500.0)
+            return ratings[team_id]
 
         for row in games.itertuples(index=False):
             winner = int(row.WTeamID)
@@ -188,6 +238,8 @@ def compute_pre_tournament_elo(regular_season_results: pd.DataFrame) -> pd.DataF
         for team_id, elo in ratings.items():
             elo_rows.append({"Season": int(season), "TeamID": int(team_id), "elo": float(elo)})
 
+        prev_ratings = dict(ratings)
+
     return pd.DataFrame(elo_rows)
 
 
@@ -196,6 +248,7 @@ def build_team_season_features(
     tourney_seeds: pd.DataFrame,
     massey_ordinals: pd.DataFrame,
     teams: pd.DataFrame,
+    include_all_teams: bool = False,
 ) -> pd.DataFrame:
     """Aggregate team-season features used for tournament prediction."""
     team_games = build_team_game_rows(regular_season_results)
@@ -204,6 +257,7 @@ def build_team_season_features(
         wins=("win", "sum"),
         win_pct=("win", "mean"),
         avg_margin=("margin", "mean"),
+        std_margin=("margin", "std"),
         avg_score_for=("score_for", "mean"),
         avg_score_against=("score_against", "mean"),
         efg=("efg", "mean"),
@@ -215,7 +269,16 @@ def build_team_season_features(
         off_rtg=("off_rtg", "mean"),
         def_rtg=("def_rtg", "mean"),
         net_rtg=("net_rtg", "mean"),
+        pace=("possessions", "mean"),
+        fg3_rate=("fg3_rate", "mean"),
+        ft_pct=("ft_pct", "mean"),
+        ast_rate=("ast_rate", "mean"),
+        stl_rate=("stl_rate", "mean"),
+        blk_rate=("blk_rate", "mean"),
+        dreb_pct=("dreb_pct", "mean"),
+        opp_tov_rate=("opp_tov_rate", "mean"),
     ).reset_index()
+    team_features["std_margin"] = team_features["std_margin"].fillna(0.0)
 
     last10 = (
         team_games.sort_values(["Season", "TeamID", "DayNum"])
@@ -227,7 +290,12 @@ def build_team_season_features(
     )
     team_features = team_features.merge(last10, on=["Season", "TeamID"], how="left")
 
-    elo_df = compute_pre_tournament_elo(regular_season_results)
+    try:
+        import ncaab_config as _cfg
+        _carryover = getattr(_cfg, "ELO_SEASON_CARRYOVER", 0.33)
+    except ImportError:
+        _carryover = 0.33
+    elo_df = compute_pre_tournament_elo(regular_season_results, carryover=_carryover)
     team_features = team_features.merge(elo_df, on=["Season", "TeamID"], how="left")
 
     # ── Strength of Schedule: avg opponent win_pct and avg opponent ELO ──────
@@ -257,7 +325,7 @@ def build_team_season_features(
     team_features = team_features.merge(
         seeds[["Season", "TeamID", "Seed", "seed_num"]],
         on=["Season", "TeamID"],
-        how="inner",
+        how="left",
     )
 
     ordinals = massey_ordinals.sort_values(["Season", "TeamID", "RankingDayNum", "SystemName"]).copy()
@@ -268,11 +336,29 @@ def build_team_season_features(
     ).reset_index()
     team_features = team_features.merge(ordinal_summary, on=["Season", "TeamID"], how="left")
 
+    fallback_rank = (
+        pd.to_numeric(team_features["median_rank"], errors="coerce")
+        .combine_first(pd.to_numeric(team_features["best_rank"], errors="coerce"))
+        .combine_first(team_features.groupby("Season")["net_rtg"].rank(method="average", ascending=False))
+    )
+
     team_features = team_features.merge(
         teams[["TeamID", "TeamName"]],
         on="TeamID",
         how="left",
     )
+    team_features["seed_num"] = pd.to_numeric(team_features["seed_num"], errors="coerce")
+    team_features["seed_num"] = team_features["seed_num"].fillna(fallback_rank.map(infer_seed_from_rank)).astype(int)
+    team_features["Seed"] = team_features["Seed"].fillna(team_features["seed_num"].map(lambda seed: f"A{int(seed):02d}"))
+
+    if not include_all_teams:
+        seeded_pairs = set(map(tuple, seeds[["Season", "TeamID"]].drop_duplicates().itertuples(index=False, name=None)))
+        keep_mask = [
+            (int(season), int(team_id)) in seeded_pairs
+            for season, team_id in team_features[["Season", "TeamID"]].itertuples(index=False, name=None)
+        ]
+        team_features = team_features.loc[keep_mask].copy()
+
     return team_features.sort_values(["Season", "seed_num", "TeamName"]).reset_index(drop=True)
 
 
@@ -324,14 +410,67 @@ def build_tournament_model_dataset(
         winner_row = build_matchup_feature_row(int(row.Season), int(row.WTeamID), int(row.LTeamID), team_features)
         winner_row["team_a_win"] = 1
         winner_row["DayNum"] = int(row.DayNum)
+        winner_row["is_tournament"] = 1
+        winner_row["sample_weight_multiplier"] = 1.0
 
         loser_row = build_matchup_feature_row(int(row.Season), int(row.LTeamID), int(row.WTeamID), team_features)
         loser_row["team_a_win"] = 0
         loser_row["DayNum"] = int(row.DayNum)
+        loser_row["is_tournament"] = 1
+        loser_row["sample_weight_multiplier"] = 1.0
 
         rows.extend([winner_row, loser_row])
 
     dataset = pd.concat(rows, ignore_index=True)
+    return dataset.sort_values(["Season", "DayNum", "team_a"]).reset_index(drop=True)
+
+
+def build_regular_season_model_dataset(
+    regular_season_results: pd.DataFrame,
+    team_features: pd.DataFrame,
+    sample_weight_multiplier: float = 0.35,
+) -> pd.DataFrame:
+    """Build a symmetric auxiliary matchup dataset from regular-season games."""
+    join_cols = [
+        "Season",
+        "TeamID",
+        "TeamName",
+        *TEAM_PROFILE_FEATURES,
+    ]
+    feature_lookup = team_features[join_cols].drop_duplicates(subset=["Season", "TeamID"]).copy()
+    winners = regular_season_results[["Season", "DayNum", "WTeamID", "LTeamID"]].rename(
+        columns={"WTeamID": "team_a", "LTeamID": "team_b"}
+    )
+    winners["team_a_win"] = 1
+    losers = regular_season_results[["Season", "DayNum", "WTeamID", "LTeamID"]].rename(
+        columns={"LTeamID": "team_a", "WTeamID": "team_b"}
+    )
+    losers["team_a_win"] = 0
+    games = pd.concat([winners, losers], ignore_index=True)
+
+    team_a_features = feature_lookup.rename(
+        columns={
+            "TeamID": "team_a",
+            "TeamName": "team_a_name",
+            **{feature: f"team_a_{feature}" for feature in TEAM_PROFILE_FEATURES},
+        }
+    )
+    team_b_features = feature_lookup.rename(
+        columns={
+            "TeamID": "team_b",
+            "TeamName": "team_b_name",
+            **{feature: f"team_b_{feature}" for feature in TEAM_PROFILE_FEATURES},
+        }
+    )
+
+    dataset = (
+        games.merge(team_a_features, on=["Season", "team_a"], how="inner")
+        .merge(team_b_features, on=["Season", "team_b"], how="inner")
+    )
+    for feature in TEAM_PROFILE_FEATURES:
+        dataset[f"{feature}_diff"] = dataset[f"team_a_{feature}"] - dataset[f"team_b_{feature}"]
+    dataset["is_tournament"] = 0
+    dataset["sample_weight_multiplier"] = float(sample_weight_multiplier)
     return dataset.sort_values(["Season", "DayNum", "team_a"]).reset_index(drop=True)
 
 

@@ -6,7 +6,7 @@ Open: http://localhost:8000
 from __future__ import annotations
 import asyncio, json, logging, math, os, re, subprocess, sys, threading, time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -37,16 +37,23 @@ _MODEL: tuple = (None, None, None)
 _NCAAB_MODEL: Any = None
 _API_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _API_CACHE_LOCK = threading.Lock()
+_PROB_HISTORY: dict[str, list[dict]] = {}   # game_id -> [{ts, model_home, model_away, market_home, market_away, home_score, away_score, period, clock}]
+_PROB_HISTORY_LOCK = threading.Lock()
+_PROB_HISTORY_MAX = 3600                     # ~5h at 5s intervals
 _MODEL_READY_CACHE: dict[str, Any] = {"mtime_ns": None, "df": None}
 _MODEL_READY_CACHE_LOCK = threading.Lock()
+_NBA_TODAY_FEATURES_LAST_GOOD: dict[str, Any] = {"df": pd.DataFrame(), "updated_at": None}
+_NBA_TODAY_FEATURES_LAST_GOOD_LOCK = threading.Lock()
 
 _UPDATE_JOB: dict[str, Any] = {"status": "idle", "log": [], "started_at": None, "finished_at": None}
 _UPDATE_JOB_LOCK = threading.Lock()
 
-LIVE_CACHE_TTL_SECONDS   = 15    # ESPN scoreboard updates every ~10-15s
+LIVE_CACHE_TTL_SECONDS   = 3     # tighten live refresh so score/clock/play text update faster
 PICKS_CACHE_TTL_SECONDS  = 120   # picks change rarely; refresh every ~90s in bg thread
 STATIC_CACHE_TTL_SECONDS = 300   # summary / teams / bracket rarely change
 NCAAB_LOGO_CACHE_TTL_SECONDS = 86400
+NCAAB_LOGO_FILE_CACHE_DIR = ROOT / "data" / "ncaab" / "logo_cache"
+NCAAB_LOGO_REQ_VERSION_HINTS = ("202603120",)
 
 _NCAAB_LOGO_ALIAS_KEYS = {
     "uconn": "connecticut",
@@ -148,7 +155,7 @@ def _bg_cache_warmer():
     not on their request.
     """
     import time as _time
-    BG_LIVE_INTERVAL   = 15   # re-fetch live scores every 15 s (ESPN is fast)
+    BG_LIVE_INTERVAL   = 5    # re-fetch live scores every 5 s for real-time chart
     BG_PICKS_INTERVAL  = 90   # re-fetch picks every 90 s
     last_live  = 0.0
     last_picks = 0.0
@@ -266,6 +273,332 @@ def _df_to_records(df):
     df2 = df.where(pd.notna(df), None)
     return [_clean(r) for r in df2.to_dict(orient="records")]
 
+
+def _anchor_elo_history(history: list[dict[str, Any]], current_elo: Any) -> list[dict[str, Any]]:
+    if not history:
+        return history
+    target = pd.to_numeric(pd.Series([current_elo]), errors="coerce").iloc[0]
+    last = pd.to_numeric(pd.Series([history[-1].get("elo")]), errors="coerce").iloc[0]
+    if pd.isna(target) or pd.isna(last):
+        return history
+    delta = float(target) - float(last)
+    if abs(delta) < 0.05:
+        return history
+    anchored: list[dict[str, Any]] = []
+    for entry in history:
+        elo_value = pd.to_numeric(pd.Series([entry.get("elo")]), errors="coerce").iloc[0]
+        if pd.isna(elo_value):
+            anchored.append(dict(entry))
+            continue
+        anchored.append({
+            **entry,
+            "elo": round(float(elo_value) + delta, 1),
+        })
+    return anchored
+
+
+# ── Matchup narrative builder ──────────────────────────────────────────
+def _build_matchup_narrative(
+    team_a: str, team_b: str,
+    stats_a: dict, stats_b: dict,
+    prob_a: float, prob_b: float,
+    form_a: list | None = None, form_b: list | None = None,
+    h2h_summary: dict | None = None,
+    league: str = "nba",
+) -> str:
+    """Generate an analytical narrative explaining why the model favors one side.
+
+    The goal is to read like a sports analyst's pre-game breakdown, not a stat
+    sheet.  We identify the *story* of the matchup — what each team does well,
+    where the mismatch lives, and what the underdog needs to do to win — then
+    weave the numbers in as supporting evidence rather than leading with them.
+    """
+
+    def sf(d: dict, k: str, default: float = 0.0) -> float:
+        v = d.get(k)
+        if v is None:
+            return default
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    fav, dog = (team_a, team_b) if prob_a >= prob_b else (team_b, team_a)
+    fs, ds   = (stats_a, stats_b) if prob_a >= prob_b else (stats_b, stats_a)
+    fp = max(prob_a, prob_b)
+
+    # ── Pull every number we might reference ──
+    fn,  dn  = sf(fs, "net_rtg"), sf(ds, "net_rtg")
+    fo,  do_ = sf(fs, "off_rtg", 105), sf(ds, "off_rtg", 105)
+    fd,  dd  = sf(fs, "def_rtg", 110), sf(ds, "def_rtg", 110)
+    fe,  de  = sf(fs, "elo", 1500), sf(ds, "elo", 1500)
+    fpace, dpace = sf(fs, "pace"), sf(ds, "pace")
+
+    # Form data
+    fav_form_wins, dog_form_wins = 0, 0
+    fav_form_n, dog_form_n = 0, 0
+    fav_avg_pts, dog_avg_pts = 0.0, 0.0
+    fav_avg_opp, dog_avg_opp = 0.0, 0.0
+    if form_a and form_b:
+        ff = form_a if prob_a >= prob_b else form_b
+        df_ = form_b if prob_a >= prob_b else form_a
+        recent_f, recent_d = ff[-5:], df_[-5:]
+        fav_form_n, dog_form_n = len(recent_f), len(recent_d)
+        fav_form_wins = sum(1 for g in recent_f if g.get("win"))
+        dog_form_wins = sum(1 for g in recent_d if g.get("win"))
+        fav_avg_pts = sum(float(g.get("pts") or 0) for g in recent_f) / max(fav_form_n, 1)
+        fav_avg_opp = sum(float(g.get("opp_pts") or 0) for g in recent_f) / max(fav_form_n, 1)
+        dog_avg_pts = sum(float(g.get("pts") or 0) for g in recent_d) / max(dog_form_n, 1)
+        dog_avg_opp = sum(float(g.get("opp_pts") or 0) for g in recent_d) / max(dog_form_n, 1)
+
+    # NCAAB-specific
+    fl10 = sf(fs, "last10_win_pct")
+    dl10 = sf(ds, "last10_win_pct")
+    flm  = sf(fs, "last10_margin")
+    dlm  = sf(ds, "last10_margin")
+    fsos = sf(fs, "sos")
+    dsos = sf(ds, "sos")
+    fseed = str(fs.get("seed") or "")
+    dseed = str(ds.get("seed") or "")
+
+    # H2H
+    h2h_fav_w, h2h_dog_w, h2h_n = 0, 0, 0
+    if h2h_summary:
+        h2h_fav_w = h2h_summary.get("a_wins", 0) if prob_a >= prob_b else h2h_summary.get("b_wins", 0)
+        h2h_dog_w = h2h_summary.get("b_wins", 0) if prob_a >= prob_b else h2h_summary.get("a_wins", 0)
+        h2h_n = h2h_summary.get("games_played", 0)
+
+    # ── Classify the matchup shape ──
+    net_gap   = fn - dn
+    off_gap   = fo - do_
+    def_gap   = dd - fd          # positive = fav is better (lower def_rtg)
+    elo_gap   = fe - de
+    pace_gap  = fpace - dpace
+
+    # Which side of the ball drives the favorite?
+    off_story = abs(off_gap) > abs(def_gap) and off_gap > 2
+    def_story = abs(def_gap) > abs(off_gap) and def_gap > 2
+    both_story = off_gap > 2 and def_gap > 2
+
+    # ── Build the narrative ──
+    paragraphs: list[str] = []
+
+    # --- Opening: frame the matchup shape ---
+    if fp > 0.62:
+        if both_story:
+            paragraphs.append(
+                f"This one is {fav}'s game to lose. They're better on both ends of the floor "
+                f"and the model reflects that with a {fp*100:.0f}% win probability."
+            )
+        elif off_story:
+            paragraphs.append(
+                f"The model sees {fav} as the clear favorite at {fp*100:.0f}%, "
+                f"and the case starts with their offense."
+            )
+        elif def_story:
+            paragraphs.append(
+                f"{fav} enters this matchup as a {fp*100:.0f}% favorite, "
+                f"built largely on a defensive identity that {dog} will struggle to crack."
+            )
+        else:
+            paragraphs.append(
+                f"The model likes {fav} at {fp*100:.0f}% here — not because of one dominant trait, "
+                f"but because they're simply a more complete team across the board."
+            )
+    elif fp > 0.54:
+        paragraphs.append(
+            f"This is a competitive matchup, but the model tilts toward {fav} at {fp*100:.0f}%. "
+            f"The margin is slim, and the reasons are worth understanding."
+        )
+    else:
+        paragraphs.append(
+            f"Don't let the {fp*100:.0f}-{(1-fp)*100:.0f} line fool you — this is essentially a pick'em. "
+            f"The model gives {fav} the slightest of nods, and here's why."
+        )
+
+    # --- Middle: the "why" — weave offense, defense, context together ---
+    body_parts: list[str] = []
+
+    if both_story:
+        body_parts.append(
+            f"On offense, {fav} creates high-quality looks at a rate of {fo:.1f} points "
+            f"per 100 possessions — that's {off_gap:.1f} more than {dog}'s {do_:.1f}. "
+            f"Then they flip the script on the other end, holding opponents to just {fd:.1f} "
+            f"per 100 while {dog} gives up {dd:.1f}. When you're winning on both sides of "
+            f"the ball like that, the net rating gap ({fn:+.1f} vs {dn:+.1f}) almost tells "
+            f"the story by itself."
+        )
+    elif off_story:
+        body_parts.append(
+            f"{fav} scores at an elite clip — {fo:.1f} per 100 possessions, "
+            f"compared to {dog}'s {do_:.1f}. That gap shows up in the flow of the game: "
+            f"{fav} gets into their sets more efficiently, converts at a higher rate, "
+            f"and puts constant pressure on the defense to keep up."
+        )
+        if def_gap > 0.5:
+            body_parts.append(
+                f"They're also not giving much back on the other end ({fd:.1f} def rating "
+                f"vs {dd:.1f}), which means {dog} can't simply outscore them in a shootout."
+            )
+        elif def_gap < -1.5:
+            body_parts.append(
+                f"Where it gets interesting is defense — {dog} is actually the tighter unit "
+                f"there ({dd:.1f} vs {fd:.1f}). If they can slow the pace and force {fav} "
+                f"into tougher shots, this game gets closer than the headline number suggests."
+            )
+    elif def_story:
+        body_parts.append(
+            f"{fav}'s calling card is defense. They surrender just {fd:.1f} points per 100 "
+            f"possessions while {dog} allows {dd:.1f} — that's a gap that shows up as extra "
+            f"stops, transition chances, and demoralising runs in the second half."
+        )
+        if off_gap < -1.5:
+            body_parts.append(
+                f"Offensively, {dog} actually has a slight edge ({do_:.1f} vs {fo:.1f}), "
+                f"which is why this isn't a blowout line. The question is whether {dog}'s "
+                f"shot-making can overcome {fav}'s ability to take them out of rhythm."
+            )
+    else:
+        # Balanced / small-edge matchup
+        if net_gap > 2:
+            body_parts.append(
+                f"There's no single area where {fav} dominates, but they're a tick better "
+                f"almost everywhere — offense ({fo:.1f} vs {do_:.1f}), defense ({fd:.1f} "
+                f"vs {dd:.1f}), and the accumulated edge shows up in a net rating of "
+                f"{fn:+.1f} compared to {dog}'s {dn:+.1f}."
+            )
+        else:
+            body_parts.append(
+                f"The efficiency profiles are nearly mirror images — {fav} at {fn:+.1f} "
+                f"net rating, {dog} at {dn:+.1f}. The model's lean comes from subtler "
+                f"signals in the matchup data rather than a glaring talent gap."
+            )
+
+    # Elo context (weave in, don't list)
+    if elo_gap > 60:
+        body_parts.append(
+            f"Season-long Elo backs this up convincingly — {fav} sits at {fe:.0f} "
+            f"while {dog} is at {de:.0f}, a gap that reflects months of accumulated results, "
+            f"not just a recent hot streak."
+        )
+    elif abs(elo_gap) < 15 and fp > 0.55:
+        body_parts.append(
+            f"What's notable is that Elo actually has these two nearly level ({fe:.0f} vs "
+            f"{de:.0f}), so the model's confidence isn't coming from raw résumé — it's "
+            f"reading something in the specific matchup dynamics."
+        )
+
+    # Pace / tempo framing
+    if abs(pace_gap) > 3 and fpace > 0 and dpace > 0:
+        faster = fav if pace_gap > 0 else dog
+        slower = dog if pace_gap > 0 else fav
+        body_parts.append(
+            f"Tempo could be a factor too — {faster} plays at a {max(fpace, dpace):.1f} pace "
+            f"while {slower} prefers to grind at {min(fpace, dpace):.1f}. Whoever dictates "
+            f"the speed of play has an advantage."
+        )
+
+    paragraphs.append(" ".join(body_parts))
+
+    # --- Form / momentum ---
+    form_parts: list[str] = []
+    if league == "ncaab":
+        if fl10 > 0 and dl10 > 0:
+            if fl10 - dl10 > 0.2:
+                form_parts.append(
+                    f"{fav} is peaking at the right time, winning {fl10*100:.0f}% of their "
+                    f"last ten by an average of {flm:+.1f} points. {dog} has cooled off to "
+                    f"{dl10*100:.0f}% with a margin of {dlm:+.1f} — that kind of trend matters "
+                    f"this deep into the season."
+                )
+            elif dl10 - fl10 > 0.15:
+                form_parts.append(
+                    f"Recent form is the one counterargument for {dog} — they've won "
+                    f"{dl10*100:.0f}% of their last ten ({dlm:+.1f} margin) while {fav} "
+                    f"has been a less convincing {fl10*100:.0f}% ({flm:+.1f}). If that "
+                    f"momentum carries over, this could be tighter than expected."
+                )
+    elif fav_form_n >= 3 and dog_form_n >= 3:
+        if fav_form_wins >= 4 and dog_form_wins <= 2:
+            form_parts.append(
+                f"The momentum story is clear: {fav} is {fav_form_wins}-{fav_form_n-fav_form_wins} "
+                f"over their last five, averaging {fav_avg_pts:.0f} points while giving up "
+                f"{fav_avg_opp:.0f}. {dog} is limping in at {dog_form_wins}-{dog_form_n-dog_form_wins}, "
+                f"scoring {dog_avg_pts:.0f} and allowing {dog_avg_opp:.0f}. "
+                f"Confidence and rhythm matter, and {fav} has both right now."
+            )
+        elif dog_form_wins >= 4 and fav_form_wins <= 2:
+            form_parts.append(
+                f"Here's the wrinkle: {dog} is actually rolling, going "
+                f"{dog_form_wins}-{dog_form_n-dog_form_wins} recently and averaging "
+                f"{dog_avg_pts:.0f} points, while {fav} has stumbled to "
+                f"{fav_form_wins}-{fav_form_n-fav_form_wins}. Season-long numbers "
+                f"favor {fav}, but form like that can carry a team past a paper disadvantage."
+            )
+        elif fav_form_wins >= 4:
+            form_parts.append(
+                f"{fav} brings real momentum into this one — {fav_form_wins}-{fav_form_n-fav_form_wins} "
+                f"over their last five, averaging {fav_avg_pts:.0f} points on "
+                f"{fav_avg_opp:.0f} allowed. They're playing with confidence."
+            )
+    if form_parts:
+        paragraphs.append(" ".join(form_parts))
+
+    # --- H2H & closing ---
+    closing_parts: list[str] = []
+    if h2h_n >= 3:
+        if h2h_dog_w > h2h_fav_w:
+            closing_parts.append(
+                f"One thing working in {dog}'s favor: they've won {h2h_dog_w} of the last "
+                f"{h2h_n} meetings between these two. Season stats say {fav}, but there's "
+                f"something about this particular matchup that {dog} seems to figure out."
+            )
+        elif h2h_fav_w > h2h_dog_w + 1:
+            closing_parts.append(
+                f"{fav} also has history on their side, taking {h2h_fav_w} of the last "
+                f"{h2h_n} head-to-head meetings. When these teams see each other, "
+                f"the pattern holds."
+            )
+
+    # SOS context (NCAAB)
+    if league == "ncaab" and abs(fsos - dsos) > 2:
+        if fsos > dsos:
+            closing_parts.append(
+                f"It's also worth noting that {fav}'s numbers came against a tougher "
+                f"schedule — their strength of schedule rates {fsos:.1f} vs {dog}'s {dsos:.1f}. "
+                f"That means {fav}'s metrics are battle-tested, not stat-padded."
+            )
+        else:
+            closing_parts.append(
+                f"One caveat: {dog} played the harder schedule ({dsos:.1f} SOS vs {fsos:.1f}). "
+                f"Their numbers don't look as shiny, but they were earned against tougher competition."
+            )
+
+    # Final "bottom line"
+    if fp > 0.62:
+        closing_parts.append(
+            f"Bottom line: {fav} is the better team and should win this game. "
+            f"For {dog} to pull it off, they'll need to play above their season standard "
+            f"and hope {fav} has an off night."
+        )
+    elif fp > 0.54:
+        closing_parts.append(
+            f"Bottom line: {fav} has the edge, but this is the kind of game that "
+            f"could easily go either way. A couple of key runs or a hot shooting quarter "
+            f"could flip the script."
+        )
+    else:
+        closing_parts.append(
+            f"Bottom line: flip a coin. The model sees a hair of daylight for {fav}, "
+            f"but this game will be decided by who plays better on the night, not who "
+            f"has the better résumé."
+        )
+
+    if closing_parts:
+        paragraphs.append(" ".join(closing_parts))
+
+    return "\n\n".join(paragraphs)
+
 def _ok(data):
     return JSONResponse(content=_clean(data))
 
@@ -332,7 +665,18 @@ def _load_model_ready_df() -> pd.DataFrame:
 def _get_shared_nba_today_features() -> pd.DataFrame:
     from scripts.daily_predictions import get_todays_features
 
-    return _cached_call(("nba_today_features",), PICKS_CACHE_TTL_SECONDS, get_todays_features)
+    features = _cached_call(("nba_today_features",), PICKS_CACHE_TTL_SECONDS, get_todays_features)
+    if isinstance(features, pd.DataFrame) and not features.empty:
+        with _NBA_TODAY_FEATURES_LAST_GOOD_LOCK:
+            _NBA_TODAY_FEATURES_LAST_GOOD["df"] = features.copy()
+            _NBA_TODAY_FEATURES_LAST_GOOD["updated_at"] = datetime.now(timezone.utc)
+        return features
+
+    with _NBA_TODAY_FEATURES_LAST_GOOD_LOCK:
+        fallback = _NBA_TODAY_FEATURES_LAST_GOOD.get("df")
+        if isinstance(fallback, pd.DataFrame) and not fallback.empty:
+            return fallback.copy()
+    return features
 
 
 def _get_shared_nba_market_odds() -> pd.DataFrame:
@@ -526,8 +870,65 @@ async def get_picks(edge_threshold: float = 0.03):
         logger.exception("Error in /api/picks"); raise HTTPException(500, detail=str(e))
 
 # ── Live Games ────────────────────────────────────────────────────────────────
+def _nudge_coinflip(groups: dict) -> dict:
+    """When the model outputs 50/50, lean toward whichever side the market favors."""
+    for section in ("in_progress", "upcoming", "final"):
+        for g in groups.get(section, []):
+            hp = g.get("pregame_home_prob") or g.get("home_win_prob")
+            if hp is not None and abs(float(hp) - 0.5) < 0.005:
+                kalshi_h = g.get("kalshi_home_prob")
+                if kalshi_h is not None and abs(float(kalshi_h) - 0.5) > 0.005:
+                    market_favors_home = float(kalshi_h) > 0.5
+                else:
+                    market_favors_home = True
+                h_val = 0.51 if market_favors_home else 0.49
+                a_val = 0.49 if market_favors_home else 0.51
+                # Nudge all probability fields so the UI picks it up
+                for hk in ("pregame_home_prob", "home_win_prob", "live_home_prob"):
+                    if g.get(hk) is not None and abs(float(g[hk]) - 0.5) < 0.005:
+                        g[hk] = h_val
+                for ak in ("pregame_away_prob", "away_win_prob", "live_away_prob"):
+                    if g.get(ak) is not None and abs(float(g[ak]) - 0.5) < 0.005:
+                        g[ak] = a_val
+                # Fix tied predicted scores
+                ps_h = g.get("pred_home_score")
+                ps_a = g.get("pred_away_score")
+                if ps_h is not None and ps_a is not None and ps_h == ps_a:
+                    if market_favors_home:
+                        g["pred_home_score"] = ps_h + 1
+                    else:
+                        g["pred_away_score"] = ps_a + 1
+    return groups
+
+
+def _record_prob_snapshots(payload: dict):
+    """Append a probability snapshot for each in-progress game."""
+    ts = datetime.now(timezone.utc).isoformat()
+    with _PROB_HISTORY_LOCK:
+        for g in payload.get("in_progress", []):
+            gid = str(g.get("game_id") or "")
+            if not gid:
+                continue
+            snap = {
+                "ts": ts,
+                "model_home": g.get("live_home_prob") or g.get("home_win_prob"),
+                "model_away": g.get("live_away_prob") or g.get("away_win_prob"),
+                "market_home": g.get("kalshi_home_prob"),
+                "market_away": g.get("kalshi_away_prob"),
+                "home_score": g.get("home_score", 0),
+                "away_score": g.get("away_score", 0),
+                "period": g.get("period_label") or g.get("period"),
+                "clock": g.get("clock_display") or g.get("clock"),
+            }
+            history = _PROB_HISTORY.setdefault(gid, [])
+            history.append(snap)
+            if len(history) > _PROB_HISTORY_MAX:
+                _PROB_HISTORY[gid] = history[-_PROB_HISTORY_MAX:]
+
+
 def _fetch_live_payload():
     from src.live_model import fetch_live_games, enrich_with_market_odds
+    from src.live_play_feed import get_latest_play
     elo_ratings, pregame_probs = {}, {}
     try:
         elo_df = pd.read_csv(ROOT / config.ELO_CSV)
@@ -567,6 +968,49 @@ def _fetch_live_payload():
         pass
 
     live_df = fetch_live_games(elo_ratings=elo_ratings, pregame_probs=pregame_probs)
+    try:
+        from src.data_collection import get_todays_games
+        todays_games = get_todays_games()
+        if not todays_games.empty:
+            existing_keys = set()
+            if not live_df.empty:
+                existing_keys = {
+                    (str(row.get("home_team") or ""), str(row.get("away_team") or ""))
+                    for row in live_df.to_dict("records")
+                }
+
+            missing_rows: list[dict[str, Any]] = []
+            for game in todays_games.to_dict("records"):
+                key = (str(game.get("home_team") or ""), str(game.get("away_team") or ""))
+                if key in existing_keys:
+                    continue
+
+                home_team = key[0]
+                away_team = key[1]
+                pregame_prob = pregame_probs.get((home_team, away_team)) if pregame_probs else None
+                missing_rows.append({
+                    "pregame_home_prob": round(float(pregame_prob), 4) if pregame_prob is not None else None,
+                    "game_id": str(game.get("game_id") or ""),
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "home_score": 0,
+                    "away_score": 0,
+                    "period": 0,
+                    "clock": "",
+                    "seconds_remaining": float(48 * 60),
+                    "game_status": int(game.get("game_status") or 1),
+                    "game_status_text": str(game.get("game_status_text") or ""),
+                    "home_elo": float(elo_ratings.get(home_team, config.ELO_BASE)),
+                    "away_elo": float(elo_ratings.get(away_team, config.ELO_BASE)),
+                    "live_home_prob": round(float(pregame_prob), 4) if pregame_prob is not None else 0.5,
+                    "live_away_prob": round(float(1.0 - pregame_prob), 4) if pregame_prob is not None else 0.5,
+                    "tipoff_utc": game.get("tipoff_utc"),
+                })
+
+            if missing_rows:
+                live_df = pd.concat([live_df, pd.DataFrame(missing_rows)], ignore_index=True)
+    except Exception:
+        pass
     if not live_df.empty:
         try:
             odds_df = _get_shared_nba_market_odds()
@@ -588,9 +1032,16 @@ def _fetch_live_payload():
             r["clock_display"] = f"{int(m.group(1))}:{int(float(m.group(2))):02d}" if m else cr
             p = r.get("period",0) or 0
             r["period_label"] = f"OT{p-4}" if p > 4 else (f"Q{p}" if p else "")
+            if status == 2:
+                play = get_latest_play("nba", r.get("game_id"))
+                if play:
+                    r["latest_play"] = _clean(play)
         return records
-    return {"fetched_at": datetime.now(timezone.utc).isoformat(),
-            "in_progress": _group(live_df, 2), "upcoming": _group(live_df, 1), "final": _group(live_df, 3)}
+    result = {"fetched_at": datetime.now(timezone.utc).isoformat(),
+              "in_progress": _group(live_df, 2), "upcoming": _group(live_df, 1), "final": _group(live_df, 3)}
+    result = _nudge_coinflip(result)
+    _record_prob_snapshots(result)
+    return result
 
 @app.get("/api/live")
 async def get_live():
@@ -620,6 +1071,58 @@ async def live_stream(request: Request):
             await asyncio.sleep(config.LIVE_POLL_SECONDS)
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+
+@app.get("/api/live/game/{game_id}")
+async def live_game_detail(game_id: str):
+    """Return current game data + probability history for a single game."""
+    try:
+        data = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: _cached_call(("api_live",), LIVE_CACHE_TTL_SECONDS, _fetch_live_payload),
+        )
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+    game = None
+    for bucket in ("in_progress", "upcoming", "final"):
+        for g in data.get(bucket, []):
+            if str(g.get("game_id")) == game_id:
+                game = g
+                break
+        if game:
+            break
+    if not game:
+        raise HTTPException(404, detail="Game not found")
+    with _PROB_HISTORY_LOCK:
+        history = list(_PROB_HISTORY.get(game_id, []))
+    return _ok({"game": _clean(game), "history": history})
+
+
+@app.get("/api/ncaab/live/game/{game_id}")
+async def ncaab_live_game_detail(game_id: str):
+    """Return current NCAAB game data + probability history."""
+    try:
+        data = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: _cached_call(("api_ncaab_live",), LIVE_CACHE_TTL_SECONDS, _fetch_ncaab_live_payload),
+        )
+        data = _nudge_coinflip(data)
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+    game = None
+    for bucket in ("in_progress", "upcoming", "final"):
+        for g in data.get(bucket, []):
+            if str(g.get("game_id")) == game_id:
+                game = g
+                break
+        if game:
+            break
+    if not game:
+        raise HTTPException(404, detail="Game not found")
+    with _PROB_HISTORY_LOCK:
+        history = list(_PROB_HISTORY.get(game_id, []))
+    return _ok({"game": _clean(game), "history": history})
+
 
 # ── Matchup Lab ───────────────────────────────────────────────────────────────
 @app.get("/api/matchup/teams")
@@ -727,14 +1230,23 @@ async def get_matchup(team_a: str = "BOS", team_b: str = "LAL"):
                 pred_score_a, pred_score_b = None, None
         except Exception:
             pred_score_a, pred_score_b = None, None
+        form_a_out = _form(team_a_games, ta)
+        form_b_out = _form(team_b_games, tb)
+        h2h_summ = {"a_wins":sum(1 for g in h2h if g["winner"]==ta),
+                     "b_wins":sum(1 for g in h2h if g["winner"]==tb),"games_played":len(h2h)}
+        narrative = _build_matchup_narrative(
+            ta, tb, snap_a, snap_b, pred_a, 1 - pred_a,
+            form_a=form_a_out, form_b=form_b_out,
+            h2h_summary=h2h_summ, league="nba",
+        )
         return {"team_a":ta,"team_b":tb,"pred_prob_a":round(pred_a,4),"pred_prob_b":round(1-pred_a,4),
                 "favorite":fav,"favorite_prob":round(fav_p,4),"confidence_label":conf,
                 "prediction_source": prediction_source,
                 "pred_score_a": pred_score_a, "pred_score_b": pred_score_b,
+                "narrative": narrative,
                 "market_odds":market_odds,"stats_a":snap_a,"stats_b":snap_b,
-                "form_a":_form(team_a_games, ta),"form_b":_form(team_b_games, tb),"h2h":h2h,
-                "h2h_summary":{"a_wins":sum(1 for g in h2h if g["winner"]==ta),
-                               "b_wins":sum(1 for g in h2h if g["winner"]==tb),"games_played":len(h2h)},
+                "form_a":form_a_out,"form_b":form_b_out,"h2h":h2h,
+                "h2h_summary":h2h_summ,
                 "elo_history_a":_elo_hist(team_a_games, ta),"elo_history_b":_elo_hist(team_b_games, tb)}
     try:
         cache_key = ("api_matchup", team_a.upper(), team_b.upper())
@@ -777,6 +1289,15 @@ def _load_trades_with_sync():
         return sync_paper_trades_with_results(results_df)
     except Exception:
         return load_paper_trades()
+
+
+def _load_combo_trades_with_sync():
+    from src.nba_combos import load_combo_trades, sync_combo_trades_with_results
+    try:
+        results_df = _build_results_from_game_logs()
+        return sync_combo_trades_with_results(results_df)
+    except Exception:
+        return load_combo_trades()
 
 
 def _parse_source_list(sources: Any) -> list[str]:
@@ -837,6 +1358,7 @@ def _build_nba_paper_candidates_df(edge_threshold: float = 0.03, sources: Any = 
 
 def _build_ncaab_paper_candidates_df(edge_threshold: float = 0.03, sources: Any = "kalshi") -> pd.DataFrame:
     from src.ncaab_odds import get_all_ncaab_market_odds
+    from src.ncaab_availability import apply_ncaab_availability_adjustments
     from src.ncaab_paper_trading import build_ncaab_paper_trade_candidates, compute_ncaab_paper_bankroll, load_ncaab_paper_trades
     from src.ncaab_predict import generate_market_recommendation_table, predict_market_games
 
@@ -847,6 +1369,15 @@ def _build_ncaab_paper_candidates_df(edge_threshold: float = 0.03, sources: Any 
         return pd.DataFrame()
 
     predictions = predict_market_games(odds_df)
+    predictions = apply_ncaab_availability_adjustments(
+        predictions,
+        team_a_col="home_team",
+        team_b_col="away_team",
+        prob_a_col="home_win_prob",
+        prob_b_col="away_win_prob",
+        prefix_a="home",
+        prefix_b="away",
+    )
     recs = generate_market_recommendation_table(predictions, odds_df, edge_threshold=edge_threshold)
     candidates = build_ncaab_paper_trade_candidates(
         recs,
@@ -895,6 +1426,103 @@ async def log_trades(edge_threshold: float = 0.03, sources: str = "kalshi"):
         logger.exception("Error in /api/paper-trader/log-trades"); raise HTTPException(500, detail=str(e))
 
 
+@app.post("/api/paper-trader/custom-trade")
+async def custom_paper_trade(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    
+    home_team = str(payload.get("home_team", "")).strip()
+    away_team = str(payload.get("away_team", "")).strip()
+    selected_team = str(payload.get("selected_team", "")).strip()
+    custom_stake = float(payload.get("custom_stake", 0))
+    market_source = str(payload.get("market_source", "kalshi")).strip()
+    
+    if not all([home_team, away_team, selected_team]):
+        raise HTTPException(400, detail="home_team, away_team, and selected_team are required")
+    if custom_stake <= 0:
+        raise HTTPException(400, detail="custom_stake must be > 0")
+    if selected_team not in [home_team, away_team]:
+        raise HTTPException(400, detail="selected_team must be either home_team or away_team")
+    if market_source not in ["kalshi", "polymarket"]:
+        raise HTTPException(400, detail="market_source must be 'kalshi' or 'polymarket'")
+    
+    def _run():
+        from src.paper_trading import append_paper_trades, build_custom_paper_trade, compute_live_paper_bankroll, load_paper_trades
+        trades = load_paper_trades()
+        bankroll = compute_live_paper_bankroll(trades, starting_bankroll=config.PAPER_BANKROLL_START)
+        
+        custom_trade = build_custom_paper_trade(
+            home_team=home_team,
+            away_team=away_team,
+            selected_team=selected_team,
+            custom_stake=custom_stake,
+            market_source=market_source,
+            bankroll_snapshot=bankroll["available_cash"],
+        )
+        
+        if custom_trade is None:
+            raise HTTPException(400, detail="Unable to build custom trade - market data may be unavailable")
+        
+        custom_df = pd.DataFrame([custom_trade])
+        append_paper_trades(custom_df)
+        
+        return {
+            "logged": 1,
+            "message": f"Custom trade placed: ${float(custom_trade.get('stake') or 0):.2f} on {selected_team}",
+            "trade_id": custom_trade.get("trade_id"),
+            "trade": _clean(custom_trade),
+        }
+    
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except Exception as e:
+        logger.exception("Error in /api/paper-trader/custom-trade"); raise HTTPException(500, detail=str(e))
+
+
+@app.post("/api/paper-trader/manual-preview")
+async def paper_trade_preview(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    home_team = str(payload.get("home_team", "")).strip()
+    away_team = str(payload.get("away_team", "")).strip()
+    selected_team = str(payload.get("selected_team", "")).strip()
+    custom_stake = float(payload.get("custom_stake", 0))
+    market_source = str(payload.get("market_source", "kalshi")).strip()
+
+    if not all([home_team, away_team, selected_team]):
+        raise HTTPException(400, detail="home_team, away_team, and selected_team are required")
+    if custom_stake <= 0:
+        raise HTTPException(400, detail="custom_stake must be > 0")
+
+    def _run():
+        from src.paper_trading import build_custom_paper_trade, compute_live_paper_bankroll, load_paper_trades
+        trades = load_paper_trades()
+        bankroll = compute_live_paper_bankroll(trades, starting_bankroll=config.PAPER_BANKROLL_START)
+        trade = build_custom_paper_trade(
+            home_team=home_team,
+            away_team=away_team,
+            selected_team=selected_team,
+            custom_stake=custom_stake,
+            market_source=market_source,
+            bankroll_snapshot=bankroll["available_cash"],
+        )
+        if trade is None:
+            raise HTTPException(400, detail="Unable to price manual trade")
+        return {"trade": _clean(trade)}
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in /api/paper-trader/manual-preview"); raise HTTPException(500, detail=str(e))
+
+
 @app.post("/api/paper-trader/trades")
 async def trade_candidates(request: Request):
     try:
@@ -929,6 +1557,248 @@ async def trade_candidates(request: Request):
     except Exception as e:
         logger.exception("Error in /api/paper-trader/trades"); raise HTTPException(500, detail=str(e))
 
+
+@app.get("/api/combo-trader/state")
+async def combo_state():
+    def _run():
+        from src.nba_combos import compute_combo_bankroll
+
+        trades = _load_combo_trades_with_sync()
+        bankroll = compute_combo_bankroll(trades, starting_bankroll=config.PAPER_BANKROLL_START)
+        status = trades["status"].fillna("open") if not trades.empty and "status" in trades.columns else pd.Series(dtype=str)
+        return {
+            "bankroll": {k: _clean(v) for k, v in bankroll.items()},
+            "open_count": int((status == "open").sum()),
+            "settled_count": int((status == "settled").sum()),
+        }
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+@app.get("/api/combo-trader/board")
+async def combo_board():
+    def _run():
+        from src.nba_combos import get_combo_board
+
+        return get_combo_board()
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except Exception as e:
+        logger.exception("Error in /api/combo-trader/board"); raise HTTPException(500, detail=str(e))
+
+
+@app.get("/api/combo-trader/collection/{collection_ticker}")
+async def combo_collection(collection_ticker: str):
+    def _run():
+        from src.nba_combos import get_collection_detail
+
+        detail = get_collection_detail(collection_ticker)
+        if detail is None:
+            raise HTTPException(404, detail="Combo collection not found")
+        return detail
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in /api/combo-trader/collection"); raise HTTPException(500, detail=str(e))
+
+
+@app.get("/api/player-props/calculate")
+async def player_props_calculate(
+    player: str,
+    stat: str,
+    threshold: float,
+    home_team: str | None = None,
+    away_team: str | None = None,
+):
+    if not str(player).strip():
+        raise HTTPException(400, detail="player is required")
+    if not str(stat).strip():
+        raise HTTPException(400, detail="stat is required")
+    if threshold < 0:
+        raise HTTPException(400, detail="threshold must be >= 0")
+
+    def _run():
+        from src.player_props import estimate_player_prop
+
+        estimate = estimate_player_prop(
+            player_name=player,
+            stat=stat,
+            threshold=threshold,
+            home_team=home_team,
+            away_team=away_team,
+        )
+        if estimate is None:
+            raise HTTPException(404, detail="Unable to estimate player prop")
+        return estimate
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in /api/player-props/calculate"); raise HTTPException(500, detail=str(e))
+
+
+@app.get("/api/combo-trader/candidates")
+async def combo_candidates():
+    def _run():
+        from src.nba_combos import build_best_combo_candidates, compute_combo_bankroll
+
+        trades = _load_combo_trades_with_sync()
+        bankroll = compute_combo_bankroll(trades, starting_bankroll=config.PAPER_BANKROLL_START)
+        candidates = build_best_combo_candidates(bankroll=bankroll["available_cash"])
+        return {"candidates": _df_to_records(candidates)}
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except Exception as e:
+        logger.exception("Error in /api/combo-trader/candidates"); raise HTTPException(500, detail=str(e))
+
+
+@app.post("/api/combo-trader/manual-preview")
+async def combo_manual_preview(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    collection_ticker = str(payload.get("collection_ticker", "")).strip()
+    market_tickers = [str(item).strip() for item in payload.get("market_tickers", []) if str(item).strip()]
+    custom_stake = float(payload.get("custom_stake", 0))
+
+    if not collection_ticker:
+        raise HTTPException(400, detail="collection_ticker is required")
+    if custom_stake <= 0:
+        raise HTTPException(400, detail="custom_stake must be > 0")
+
+    def _run():
+        from src.nba_combos import build_combo_trade, compute_combo_bankroll
+
+        trades = _load_combo_trades_with_sync()
+        bankroll = compute_combo_bankroll(trades, starting_bankroll=config.PAPER_BANKROLL_START)
+        trade = build_combo_trade(
+            collection_ticker=collection_ticker,
+            market_tickers=market_tickers,
+            custom_stake=custom_stake,
+            bankroll_snapshot=bankroll["available_cash"],
+        )
+        if trade is None:
+            raise HTTPException(400, detail="Unable to price combo")
+        return {"trade": _clean(trade)}
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in /api/combo-trader/manual-preview"); raise HTTPException(500, detail=str(e))
+
+
+@app.post("/api/combo-trader/custom-trade")
+async def combo_custom_trade(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    collection_ticker = str(payload.get("collection_ticker", "")).strip()
+    market_tickers = [str(item).strip() for item in payload.get("market_tickers", []) if str(item).strip()]
+    custom_stake = float(payload.get("custom_stake", 0))
+
+    if not collection_ticker:
+        raise HTTPException(400, detail="collection_ticker is required")
+    if custom_stake <= 0:
+        raise HTTPException(400, detail="custom_stake must be > 0")
+
+    def _run():
+        from src.nba_combos import append_combo_trades, build_combo_trade, compute_combo_bankroll
+
+        trades = _load_combo_trades_with_sync()
+        bankroll = compute_combo_bankroll(trades, starting_bankroll=config.PAPER_BANKROLL_START)
+        trade = build_combo_trade(
+            collection_ticker=collection_ticker,
+            market_tickers=market_tickers,
+            custom_stake=custom_stake,
+            bankroll_snapshot=bankroll["available_cash"],
+        )
+        if trade is None:
+            raise HTTPException(400, detail="Unable to build combo")
+        append_combo_trades(pd.DataFrame([trade]))
+        return {
+            "logged": 1,
+            "message": f"Combo logged: {trade.get('combo_label', 'Combo')}",
+            "trade_id": trade.get("trade_id"),
+            "trade": _clean(trade),
+        }
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in /api/combo-trader/custom-trade"); raise HTTPException(500, detail=str(e))
+
+
+@app.post("/api/combo-trader/trades")
+async def combo_trade_candidates(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    candidate_ids = [str(item).strip() for item in payload.get("candidate_ids", []) if str(item).strip()]
+    if not candidate_ids:
+        raise HTTPException(400, detail="candidate_ids are required")
+
+    def _run():
+        from src.nba_combos import append_combo_trades, build_best_combo_candidates, compute_combo_bankroll
+
+        trades = _load_combo_trades_with_sync()
+        bankroll = compute_combo_bankroll(trades, starting_bankroll=config.PAPER_BANKROLL_START)
+        candidates = build_best_combo_candidates(bankroll=bankroll["available_cash"])
+        if candidates.empty:
+            return {"logged": 0, "message": "No combo candidates are currently eligible", "trade_ids": []}
+        selected = candidates[candidates["candidate_id"].astype(str).isin(candidate_ids)].copy()
+        if selected.empty:
+            return {"logged": 0, "message": "No matching combo candidates are currently eligible", "trade_ids": []}
+        append_combo_trades(selected)
+        trade_ids = [str(value) for value in selected["trade_id"].tolist()] if "trade_id" in selected.columns else []
+        return {"logged": len(selected), "message": f"Logged {len(selected)} combo{'s' if len(selected) != 1 else ''}", "trade_ids": trade_ids}
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except Exception as e:
+        logger.exception("Error in /api/combo-trader/trades"); raise HTTPException(500, detail=str(e))
+
+
+@app.get("/api/combo-trader/positions")
+async def combo_positions():
+    def _run():
+        trades = _load_combo_trades_with_sync()
+        if trades.empty:
+            return {"positions": [], "open": [], "settled": []}
+        trades = trades.sort_values("placed_at", ascending=False) if "placed_at" in trades.columns else trades
+        status = trades["status"].fillna("open") if "status" in trades.columns else pd.Series("open", index=trades.index)
+        open_positions = trades.loc[status == "open"].copy()
+        settled_positions = trades.loc[status == "settled"].copy()
+        return {
+            "positions": _df_to_records(trades),
+            "open": _df_to_records(open_positions),
+            "settled": _df_to_records(settled_positions),
+        }
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except Exception as e:
+        logger.exception("Error in /api/combo-trader/positions"); raise HTTPException(500, detail=str(e))
+
 @app.get("/api/paper-trader/open-positions")
 async def open_positions():
     def _run():
@@ -945,6 +1815,20 @@ async def open_positions():
     try:
         return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
     except Exception as e: raise HTTPException(500, detail=str(e))
+
+
+@app.delete("/api/paper-trader/trade/{trade_id}")
+async def delete_paper_trade(trade_id: str):
+    try:
+        from src.paper_trading import delete_paper_trade as _delete
+        removed = _delete(trade_id)
+        if not removed:
+            raise HTTPException(404, detail="Trade not found")
+        return {"ok": True, "trade_id": trade_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting trade"); raise HTTPException(500, detail=str(e))
 
 @app.get("/api/paper-trader/auto-bet-status")
 async def auto_bet_status():
@@ -1148,6 +2032,20 @@ def _build_ncaab_picks_payload(edge_threshold: float = 0.03):
         predictions = predict_market_games(odds_df)
         if predictions.empty:
             return {"picks": [], "available": True}
+        try:
+            from src.ncaab_availability import apply_ncaab_availability_adjustments
+
+            predictions = apply_ncaab_availability_adjustments(
+                predictions,
+                team_a_col="home_team",
+                team_b_col="away_team",
+                prob_a_col="home_win_prob",
+                prob_b_col="away_win_prob",
+                prefix_a="home",
+                prefix_b="away",
+            )
+        except Exception as exc:
+            logger.warning("NCAA live availability adjustment skipped for picks: %s", exc)
         recs = generate_market_recommendation_table(predictions, odds_df, edge_threshold=edge_threshold)
         return {"picks": _df_to_records(recs), "available": True}
     except Exception as e:
@@ -1160,6 +2058,8 @@ def _fetch_ncaab_live_payload():
     data = fetch_ncaab_live_games()
     if isinstance(data, dict) and "fetched_at" not in data:
         data["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    if isinstance(data, dict):
+        _record_prob_snapshots(data)
     return data
 
 
@@ -1211,6 +2111,33 @@ def _resolve_ncaab_logo_url(team: str) -> str | None:
     school_url = _ncaab_school_url_lookup().get(key)
     if not school_url:
         return None
+
+    slug_match = re.search(r"/schools/([^/]+)/men/(\d{4})\.html", school_url)
+    if slug_match:
+        school_slug, season = slug_match.groups()
+        req_versions: list[str] = []
+        today = datetime.now(timezone.utc).date()
+        for offset in range(0, 14):
+            req_versions.append(f"{(today - timedelta(days=offset)).strftime('%Y%m%d')}0")
+        req_versions.extend(NCAAB_LOGO_REQ_VERSION_HINTS)
+
+        seen_versions: set[str] = set()
+        for req_version in req_versions:
+            if req_version in seen_versions:
+                continue
+            seen_versions.add(req_version)
+            direct_url = f"https://cdn.ssref.net/req/{req_version}/tlogo/ncaa/{school_slug}-{season}.png"
+            try:
+                response = requests.get(
+                    direct_url,
+                    timeout=10,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                content_type = str(response.headers.get("content-type") or "").lower()
+                if response.ok and content_type.startswith("image/") and len(response.content) > 256:
+                    return direct_url
+            except Exception:
+                pass
 
     try:
         response = requests.get(
@@ -1292,6 +2219,10 @@ def _strip_white_logo_background(raw_bytes: bytes) -> bytes:
 
 
 def _build_ncaab_logo_asset(team: str) -> tuple[bytes, str]:
+    cache_path = NCAAB_LOGO_FILE_CACHE_DIR / f"{_normalize_team_key(team)}.png"
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return cache_path.read_bytes(), "image/png"
+
     url = _resolve_ncaab_logo_url(team)
     if not url:
         raise HTTPException(404, detail=f"No logo found for {team}")
@@ -1311,7 +2242,10 @@ def _build_ncaab_logo_asset(team: str) -> tuple[bytes, str]:
     if "svg" in content_type or url.lower().endswith(".svg"):
         return response.content, "image/svg+xml"
 
-    return _strip_white_logo_background(response.content), "image/png"
+    cleaned = _strip_white_logo_background(response.content)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(cleaned)
+    return cleaned, "image/png"
 
 @app.get("/api/ncaab/summary")
 async def ncaab_summary():
@@ -1339,7 +2273,11 @@ async def ncaab_bracket():
     def _run():
         import ncaab_config as nc
         if not nc.NCAAB_CURRENT_PROJECTED_BRACKET_CSV.exists(): return {"bracket":[],"available":False}
-        return {"bracket":_df_to_records(pd.read_csv(nc.NCAAB_CURRENT_PROJECTED_BRACKET_CSV)),"available":True}
+        result: dict = {"bracket":_df_to_records(pd.read_csv(nc.NCAAB_CURRENT_PROJECTED_BRACKET_CSV)),"available":True}
+        adv_path = nc.NCAAB_PROCESSED_DIR / "advancement_probabilities.csv"
+        if adv_path.exists():
+            result["advancement"] = _df_to_records(pd.read_csv(adv_path))
+        return result
     return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
 
 @app.get("/api/ncaab/teams")
@@ -1350,6 +2288,118 @@ async def ncaab_teams():
         return {"teams":_df_to_records(pd.read_csv(nc.NCAAB_CURRENT_TEAM_FEATURES_CSV)),"available":True}
     data = await asyncio.get_event_loop().run_in_executor(
         None, lambda: _cached_call(("api_ncaab_teams",), STATIC_CACHE_TTL_SECONDS, _run)
+    )
+    return _ok(data)
+
+
+@app.get("/api/ncaab/team-explorer/teams")
+async def ncaab_explorer_teams():
+    def _run():
+        import ncaab_config as nc
+        if not nc.NCAAB_CURRENT_TEAM_FEATURES_CSV.exists():
+            return {"teams": []}
+        df = pd.read_csv(nc.NCAAB_CURRENT_TEAM_FEATURES_CSV)
+        name_col = "TeamName" if "TeamName" in df.columns else "team_name"
+        teams = sorted(df[name_col].dropna().astype(str).drop_duplicates().tolist())
+        return {"teams": teams}
+
+    data = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: _cached_call(("api_ncaab_team_explorer_teams",), STATIC_CACHE_TTL_SECONDS, _run)
+    )
+    return _ok(data)
+
+
+@app.get("/api/ncaab/team-explorer/{team}")
+async def ncaab_explorer_team(team: str):
+    def _run():
+        import ncaab_config as nc
+        from src.ncaab_live import fetch_team_game_log
+
+        if not nc.NCAAB_CURRENT_TEAM_FEATURES_CSV.exists():
+            return {"team": team, "error": "no_data"}
+
+        df = pd.read_csv(nc.NCAAB_CURRENT_TEAM_FEATURES_CSV)
+        name_col = "TeamName" if "TeamName" in df.columns else "team_name"
+
+        match = df[df[name_col].astype(str).str.lower() == team.lower()]
+        if match.empty:
+            match = df[df[name_col].astype(str).str.lower().str.contains(team.lower(), na=False)]
+        if match.empty:
+            return {"team": team, "error": "no_data"}
+
+        row = match.iloc[0]
+        team_name = str(row[name_col])
+        season = str(int(pd.to_numeric(pd.Series([row.get("Season")]), errors="coerce").fillna(2026).iloc[0]))
+        current_elo = float(pd.to_numeric(pd.Series([row.get("elo")]), errors="coerce").fillna(1500.0).iloc[0])
+        wins = int(pd.to_numeric(pd.Series([row.get("wins")]), errors="coerce").fillna(0).iloc[0])
+        losses = int(pd.to_numeric(pd.Series([row.get("losses")]), errors="coerce").fillna(0).iloc[0])
+
+        gamelog_url = str(row.get("gamelog_url", "") or "")
+        team_candidates = df[name_col].dropna().astype(str).drop_duplicates().tolist()
+        game_log = fetch_team_game_log(team_name, gamelog_url, team_candidates) if gamelog_url else pd.DataFrame()
+
+        elo_history: list[dict[str, Any]] = []
+        rolling_form: list[dict[str, Any]] = []
+        if not game_log.empty:
+            ratings: dict[str, float] = {}
+            for game in game_log.sort_values("date").itertuples(index=False):
+                if pd.isna(game.win):
+                    continue
+                opp_name = str(game.OppTeamName or "")
+                if not opp_name:
+                    continue
+                team_rating = ratings.get(team_name, 1500.0)
+                opp_rating = ratings.get(opp_name, 1500.0)
+                loc = str(game.game_location or "")
+                team_effective = team_rating + (70.0 if loc == "" else 0.0)
+                opp_effective = opp_rating + (70.0 if loc == "@" else 0.0)
+                expected_team = 1.0 / (1.0 + 10.0 ** ((opp_effective - team_effective) / 400.0))
+                team_score = float(game.team_score)
+                opp_score = float(game.opp_score)
+                margin = max(abs(team_score - opp_score), 1.0)
+                multiplier = np.log(margin + 1.0) * (2.2 / ((abs(team_rating - opp_rating) * 0.001) + 2.2))
+                delta = 20.0 * multiplier * (float(game.win) - expected_team)
+                team_rating = team_rating + delta
+                opp_rating = opp_rating - delta
+                ratings[team_name] = team_rating
+                ratings[opp_name] = opp_rating
+                elo_history.append({"game_date": str(pd.Timestamp(game.date).date()), "elo": round(float(team_rating), 1)})
+
+            rolling = game_log.sort_values("date").copy()
+            rolling["roll_10_pts"] = rolling["team_score"].rolling(10, min_periods=1).mean()
+            rolling["roll_10_opp_pts"] = rolling["opp_score"].rolling(10, min_periods=1).mean()
+            rolling_form = [
+                {
+                    "game_date": str(pd.Timestamp(item.date).date()),
+                    "roll_10_pts": _clean(item.roll_10_pts),
+                    "roll_10_opp_pts": _clean(item.roll_10_opp_pts),
+                }
+                for item in rolling.tail(30).itertuples(index=False)
+            ]
+
+        elo_history = _anchor_elo_history(elo_history[-82:], current_elo)
+
+        return {
+            "team": team_name,
+            "current_elo": round(current_elo, 1),
+            "record_season": season,
+            "season_record": {"wins": wins, "losses": losses},
+            "win_pct": _clean(row.get("win_pct")),
+            "elo_history": elo_history,
+            "rolling_form": rolling_form,
+            "seed": row.get("Seed") or row.get("seed_num"),
+            "net_rtg": _clean(row.get("net_rtg")),
+            "avg_margin": _clean(row.get("avg_margin")),
+            "off_rtg": _clean(row.get("off_rtg")),
+            "def_rtg": _clean(row.get("def_rtg")),
+            "last10_win_pct": _clean(row.get("last10_win_pct")),
+            "last10_margin": _clean(row.get("last10_margin")),
+            "median_rank": _clean(row.get("median_rank")),
+            "best_rank": _clean(row.get("best_rank")),
+        }
+
+    data = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: _cached_call(("api_ncaab_team_explorer", str(team).lower()), 300, _run)
     )
     return _ok(data)
 
@@ -1423,6 +2473,103 @@ async def ncaab_log_trades(edge_threshold: float = 0.03, sources: str = "kalshi"
     except Exception as e:
         logger.exception("Error logging NCAAB trades"); raise HTTPException(500, detail=str(e))
 
+@app.post("/api/ncaab/paper-trader/custom-trade")
+async def ncaab_custom_paper_trade(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    
+    home_team = str(payload.get("home_team", "")).strip()
+    away_team = str(payload.get("away_team", "")).strip()
+    selected_team = str(payload.get("selected_team", "")).strip()
+    custom_stake = float(payload.get("custom_stake", 0))
+    market_source = str(payload.get("market_source", "kalshi")).strip()
+    
+    if not all([home_team, away_team, selected_team]):
+        raise HTTPException(400, detail="home_team, away_team, and selected_team are required")
+    if custom_stake <= 0:
+        raise HTTPException(400, detail="custom_stake must be > 0")
+    if selected_team not in [home_team, away_team]:
+        raise HTTPException(400, detail="selected_team must be either home_team or away_team")
+    if market_source not in ["kalshi"]:
+        raise HTTPException(400, detail="market_source must be 'kalshi' for NCAAB")
+    
+    def _run():
+        from src.ncaab_paper_trading import append_ncaab_paper_trades, build_custom_ncaab_paper_trade, compute_ncaab_paper_bankroll, load_ncaab_paper_trades
+        trades = load_ncaab_paper_trades()
+        bankroll = compute_ncaab_paper_bankroll(trades)
+        
+        custom_trade = build_custom_ncaab_paper_trade(
+            home_team=home_team,
+            away_team=away_team,
+            selected_team=selected_team,
+            custom_stake=custom_stake,
+            market_source=market_source,
+            bankroll_snapshot=bankroll["available_cash"],
+        )
+        
+        if custom_trade is None:
+            raise HTTPException(400, detail="Unable to build custom trade - market data may be unavailable")
+        
+        custom_df = pd.DataFrame([custom_trade])
+        append_ncaab_paper_trades(custom_df)
+        
+        return {
+            "logged": 1,
+            "message": f"Custom trade placed: ${float(custom_trade.get('stake') or 0):.2f} on {selected_team}",
+            "trade_id": custom_trade.get("trade_id"),
+            "trade": _clean(custom_trade),
+        }
+    
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except Exception as e:
+        logger.exception("Error in /api/ncaab/paper-trader/custom-trade"); raise HTTPException(500, detail=str(e))
+
+
+@app.post("/api/ncaab/paper-trader/manual-preview")
+async def ncaab_manual_trade_preview(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    home_team = str(payload.get("home_team", "")).strip()
+    away_team = str(payload.get("away_team", "")).strip()
+    selected_team = str(payload.get("selected_team", "")).strip()
+    custom_stake = float(payload.get("custom_stake", 0))
+    market_source = str(payload.get("market_source", "kalshi")).strip()
+
+    if not all([home_team, away_team, selected_team]):
+        raise HTTPException(400, detail="home_team, away_team, and selected_team are required")
+    if custom_stake <= 0:
+        raise HTTPException(400, detail="custom_stake must be > 0")
+
+    def _run():
+        from src.ncaab_paper_trading import build_custom_ncaab_paper_trade, compute_ncaab_paper_bankroll, load_ncaab_paper_trades
+        trades = load_ncaab_paper_trades()
+        bankroll = compute_ncaab_paper_bankroll(trades)
+        trade = build_custom_ncaab_paper_trade(
+            home_team=home_team,
+            away_team=away_team,
+            selected_team=selected_team,
+            custom_stake=custom_stake,
+            market_source=market_source,
+            bankroll_snapshot=bankroll["available_cash"],
+        )
+        if trade is None:
+            raise HTTPException(400, detail="Unable to price manual trade")
+        return {"trade": _clean(trade)}
+
+    try:
+        return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in /api/ncaab/paper-trader/manual-preview"); raise HTTPException(500, detail=str(e))
+
+
 @app.post("/api/ncaab/paper-trader/trades")
 async def ncaab_trade_candidates(request: Request):
     try:
@@ -1486,9 +2633,15 @@ async def ncaab_auto_trade_status():
 @app.get("/api/ncaab/paper-trader/positions")
 async def ncaab_paper_positions():
     def _run():
-        from src.ncaab_paper_trading import load_ncaab_paper_trades
+        from src.ncaab_odds import get_all_ncaab_market_odds
+        from src.ncaab_paper_trading import load_ncaab_paper_trades, mark_open_ncaab_trades_to_market
         trades = load_ncaab_paper_trades()
         if trades.empty: return {"open":[],"settled":[]}
+        try:
+            odds = get_all_ncaab_market_odds(record_snapshot=False)
+            trades = mark_open_ncaab_trades_to_market(trades, odds)
+        except Exception:
+            pass
         open_t = trades[trades.get("status","open")=="open"] if "status" in trades.columns else trades
         settled = trades[trades.get("status","")=="settled"] if "status" in trades.columns else pd.DataFrame()
         return {"open":_df_to_records(open_t),"settled":_df_to_records(settled)}
@@ -1506,6 +2659,7 @@ async def ncaab_live():
             None,
             lambda: _cached_call(("api_ncaab_live",), LIVE_CACHE_TTL_SECONDS, _fetch_ncaab_live_payload),
         )
+        data = _nudge_coinflip(data)
         return _ok(data)
     except Exception as e:
         raise HTTPException(500, detail=str(e))
@@ -1515,6 +2669,11 @@ async def ncaab_live():
 async def ncaab_matchup(team_a: str = "", team_b: str = ""):
     def _run():
         import ncaab_config as nc
+        from src.ncaab_live import (
+            CURRENT_ELO_HOME_EDGE,
+            CURRENT_ELO_K,
+            fetch_team_game_log,
+        )
         if not nc.NCAAB_CURRENT_TEAM_FEATURES_CSV.exists():
             raise ValueError("Team features not built yet")
         if not str(team_a).strip() or not str(team_b).strip():
@@ -1544,23 +2703,111 @@ async def ncaab_matchup(team_a: str = "", team_b: str = ""):
 
         # Build stat comparison rows from team_features csv
         def stats(row):
+            wins  = row.get("wins") or (int(row.get("g", 0) or 0) * float(row.get("win_pct", 0) or 0))
+            losses = row.get("losses") or (int(row.get("g", 0) or 0) - wins)
             return {
                 "name": str(row[name_col]),
                 "seed": str(row.get("Seed", "")) or str(row.get("seed_num", "")),
-                "elo": row.get("elo"),
-                "win_pct": row.get("win_pct"),
-                "net_rtg": row.get("net_rtg"),
-                "off_rtg": row.get("off_rtg"),
-                "def_rtg": row.get("def_rtg"),
-                "avg_margin": row.get("avg_margin"),
-                "srs": row.get("srs"),
-                "sos": row.get("sos"),
-                "last10_win_pct": row.get("last10_win_pct"),
-                "last10_margin": row.get("last10_margin"),
-                "efg": row.get("efg"),
-                "avg_score_for": row.get("avg_score_for"),
-                "avg_score_against": row.get("avg_score_against"),
+                "wins": _clean(wins),
+                "losses": _clean(losses),
+                "elo": _clean(row.get("elo")),
+                "win_pct": _clean(row.get("win_pct")),
+                "net_rtg": _clean(row.get("net_rtg")),
+                "off_rtg": _clean(row.get("off_rtg")),
+                "def_rtg": _clean(row.get("def_rtg")),
+                "avg_margin": _clean(row.get("avg_margin")),
+                "srs": _clean(row.get("srs")),
+                "sos": _clean(row.get("sos")),
+                "last10_win_pct": _clean(row.get("last10_win_pct")),
+                "last10_margin": _clean(row.get("last10_margin")),
+                "efg": _clean(row.get("efg")),
+                "avg_score_for": _clean(row.get("avg_score_for")),
+                "avg_score_against": _clean(row.get("avg_score_against")),
+                "pace": _clean(row.get("pace")),
+                "fg3_rate": _clean(row.get("fg3_rate")),
+                "ft_pct": _clean(row.get("ft_pct")),
+                "tov_rate": _clean(row.get("tov_rate")),
+                "ast_rate": _clean(row.get("ast_rate")),
+                "stl_rate": _clean(row.get("stl_rate")),
+                "blk_rate": _clean(row.get("blk_rate")),
+                "oreb_pct": _clean(row.get("oreb_pct")),
+                "dreb_pct": _clean(row.get("dreb_pct")),
+                "opp_efg": _clean(row.get("opp_efg")),
+                "opp_tov_rate": _clean(row.get("opp_tov_rate")),
+                "median_rank": _clean(row.get("median_rank")),
+                "best_rank": _clean(row.get("best_rank")),
+                "std_margin": _clean(row.get("std_margin")),
             }
+
+        def form_from_gamelog(row) -> list[dict]:
+            """Extract last-10-games form from fetched game log."""
+            gamelog_url = str(row.get("gamelog_url", "") or "")
+            team_name = str(row[name_col])
+            if not gamelog_url:
+                return []
+            team_candidates = tf[name_col].dropna().astype(str).drop_duplicates().tolist()
+            game_log = fetch_team_game_log(team_name, gamelog_url, team_candidates)
+            if game_log.empty:
+                return []
+            recent = game_log.sort_values("date").tail(10)
+            out = []
+            for g in recent.itertuples(index=False):
+                if pd.isna(getattr(g, "win", None)):
+                    continue
+                out.append({
+                    "game_date": pd.Timestamp(g.date).date().isoformat() if not pd.isna(g.date) else None,
+                    "win": int(g.win),
+                    "pts": _clean(getattr(g, "team_score", None)),
+                    "opp_pts": _clean(getattr(g, "opp_score", None)),
+                    "opponent": str(getattr(g, "OppTeamName", "") or ""),
+                })
+            return out
+
+        def elo_history(row) -> list[dict[str, float | str | None]]:
+            gamelog_url = str(row.get("gamelog_url", "") or "")
+            team_name = str(row[name_col])
+            if not gamelog_url:
+                return []
+
+            team_candidates = tf[name_col].dropna().astype(str).drop_duplicates().tolist()
+            game_log = fetch_team_game_log(team_name, gamelog_url, team_candidates)
+            if game_log.empty:
+                return []
+
+            ratings: dict[str, float] = {}
+            history: list[dict[str, float | str | None]] = []
+            for game in game_log.sort_values("date").itertuples(index=False):
+                if pd.isna(game.win):
+                    continue
+                opp_name = str(game.OppTeamName or "")
+                if not opp_name:
+                    continue
+
+                team_rating = ratings.get(team_name, 1500.0)
+                opp_rating = ratings.get(opp_name, 1500.0)
+                loc = str(game.game_location or "")
+                team_effective = team_rating + (CURRENT_ELO_HOME_EDGE if loc == "" else 0.0)
+                opp_effective = opp_rating + (CURRENT_ELO_HOME_EDGE if loc == "@" else 0.0)
+                expected_team = 1.0 / (1.0 + 10.0 ** ((opp_effective - team_effective) / 400.0))
+
+                team_score = float(game.team_score)
+                opp_score = float(game.opp_score)
+                margin = max(abs(team_score - opp_score), 1.0)
+                multiplier = np.log(margin + 1.0) * (2.2 / ((abs(team_rating - opp_rating) * 0.001) + 2.2))
+                delta = CURRENT_ELO_K * multiplier * (float(game.win) - expected_team)
+
+                team_rating = team_rating + delta
+                opp_rating = opp_rating - delta
+                ratings[team_name] = team_rating
+                ratings[opp_name] = opp_rating
+                history.append(
+                    {
+                        "game_date": pd.Timestamp(game.date).date().isoformat(),
+                        "elo": round(float(team_rating), 1),
+                    }
+                )
+
+            return _anchor_elo_history(history[-82:], row.get("elo"))
 
         pa = float(result["team_a_win_prob"])
         pb = float(result["team_b_win_prob"])
@@ -1590,6 +2837,51 @@ async def ncaab_matchup(team_a: str = "", team_b: str = ""):
                 pred_score_a, pred_score_b = None, None
         except Exception:
             pred_score_a, pred_score_b = None, None
+        try:
+            from src.ncaab_availability import apply_ncaab_availability_adjustments
+
+            adjusted_probs = apply_ncaab_availability_adjustments(
+                pd.DataFrame(
+                    [
+                        {
+                            "team_a": result["team_a_name"],
+                            "team_b": result["team_b_name"],
+                            "team_a_win_prob": pa,
+                            "team_b_win_prob": pb,
+                            "team_a_win_prob_model": pa_raw,
+                            "team_b_win_prob_model": pb_raw,
+                        }
+                    ]
+                ),
+                team_a_col="team_a",
+                team_b_col="team_b",
+                prob_a_col="team_a_win_prob",
+                prob_b_col="team_b_win_prob",
+                prefix_a="team_a",
+                prefix_b="team_b",
+            ).iloc[0]
+            pa = float(adjusted_probs["team_a_win_prob"])
+            pb = float(adjusted_probs["team_b_win_prob"])
+            team_a_penalty = float(adjusted_probs.get("team_a_availability_penalty_elo", 0.0))
+            team_b_penalty = float(adjusted_probs.get("team_b_availability_penalty_elo", 0.0))
+            team_a_summary = str(adjusted_probs.get("team_a_availability_summary", "No major availability flags"))
+            team_b_summary = str(adjusted_probs.get("team_b_availability_summary", "No major availability flags"))
+        except Exception as exc:
+            logger.warning("NCAA matchup availability adjustment skipped: %s", exc)
+            team_a_penalty = 0.0
+            team_b_penalty = 0.0
+            team_a_summary = "No major availability flags"
+            team_b_summary = "No major availability flags"
+        stats_a_out = stats(ra)
+        stats_b_out = stats(rb)
+        form_a_out = form_from_gamelog(ra)
+        form_b_out = form_from_gamelog(rb)
+        narrative = _build_matchup_narrative(
+            result["team_a_name"], result["team_b_name"],
+            stats_a_out, stats_b_out, pa, pb,
+            form_a=form_a_out, form_b=form_b_out,
+            league="ncaab",
+        )
         return {
             "team_a": result["team_a_name"],
             "team_b": result["team_b_name"],
@@ -1604,8 +2896,17 @@ async def ncaab_matchup(team_a: str = "", team_b: str = ""):
             "team_b_seed_edge": team_b_seed_edge,
             "pred_score_a": pred_score_a,
             "pred_score_b": pred_score_b,
-            "stats_a": stats(ra),
-            "stats_b": stats(rb),
+            "narrative": narrative,
+            "stats_a": stats_a_out,
+            "stats_b": stats_b_out,
+            "form_a": form_a_out,
+            "form_b": form_b_out,
+            "team_a_availability_penalty_elo": team_a_penalty,
+            "team_b_availability_penalty_elo": team_b_penalty,
+            "team_a_availability_summary": team_a_summary,
+            "team_b_availability_summary": team_b_summary,
+            "elo_history_a": elo_history(ra),
+            "elo_history_b": elo_history(rb),
         }
     try:
         return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))

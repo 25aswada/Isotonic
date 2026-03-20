@@ -60,14 +60,19 @@ def fetch_results(target_date: date) -> pd.DataFrame:
         if not home_abbr or not away_abbr:
             continue
 
-        home_win = 1 if home["WL"] == "W" else 0
+        home_pts = pd.to_numeric(home.get("PTS"), errors="coerce")
+        away_pts = pd.to_numeric(away.get("PTS"), errors="coerce")
+        if pd.notna(home_pts) and pd.notna(away_pts):
+            home_win = 1 if float(home_pts) > float(away_pts) else 0
+        else:
+            home_win = 1 if home.get("WL") == "W" else 0
         rows.append({
             "game_id": game_id,
             "game_date": pd.to_datetime(target_date),
             "home_team": home_abbr,
             "away_team": away_abbr,
-            "home_pts": int(home["PTS"]),
-            "away_pts": int(away["PTS"]),
+            "home_pts": int(home_pts),
+            "away_pts": int(away_pts),
             "home_win": home_win,
         })
 

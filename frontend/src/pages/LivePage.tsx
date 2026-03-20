@@ -1,8 +1,8 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { Pin, PinOff, RefreshCcw, TimerReset } from 'lucide-react'
-import { useParams } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 
 import { Button, EmptyState, ErrorState, LoadingPanel, Pill, Surface } from '../components/ui'
 import { getLive } from '../lib/api'
@@ -17,11 +17,6 @@ function gameKey(game: LiveGame, fallback: number) {
   return String(game.game_id ?? `${game.away_team}-${game.home_team}-${fallback}`)
 }
 
-function magnitude(game: LiveGame) {
-  const liveEdge = Math.abs(Number(game.live_home_edge ?? game.live_away_edge ?? game.edge ?? 0))
-  return Number.isFinite(liveEdge) ? liveEdge : 0
-}
-
 function byTipoffAsc(left: LiveGame, right: LiveGame) {
   return String(left.tipoff_utc ?? '').localeCompare(String(right.tipoff_utc ?? ''))
 }
@@ -32,6 +27,89 @@ function comparisonTone(value: number | null | undefined, other: number | null |
   return value > other ? 'good' : 'bad'
 }
 
+function AnimatedLiveValue({
+  valueKey,
+  className,
+  children,
+}: {
+  valueKey: string
+  className?: string
+  children: ReactNode
+}) {
+  return (
+    <motion.span
+      key={valueKey}
+      className={className}
+      initial={{ opacity: 0.55, y: 6, scale: 0.985, filter: 'blur(3px)' }}
+      animate={{ opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
+      transition={{ duration: 0.28, ease: 'easeOut' }}
+    >
+      {children}
+    </motion.span>
+  )
+}
+
+function AnimatedScoreValue({
+  numericValue,
+  children,
+}: {
+  numericValue: number
+  children: ReactNode
+}) {
+  const previousValueRef = useRef(numericValue)
+  const delta = numericValue - previousValueRef.current
+
+  useEffect(() => {
+    previousValueRef.current = numericValue
+  }, [numericValue])
+
+  const toneClass =
+    delta > 0 ? 'live-score-value--up' : delta < 0 ? 'live-score-value--down' : 'live-score-value--steady'
+
+  return (
+    <motion.span
+      className={`live-score-value ${toneClass}`}
+      initial={{ opacity: 0.6, y: 10, scale: 0.97 }}
+      animate={
+        delta > 0
+          ? {
+              opacity: [0.9, 1, 1],
+              y: [10, -2, 0],
+              scale: [0.97, 1.08, 1],
+              color: ['#16c75f', '#31db78', '#ffffff'],
+              textShadow: [
+                '0 0 0 rgba(22,199,95,0)',
+                '0 0 6px rgba(22,199,95,0.12)',
+                '0 0 0 rgba(22,199,95,0)',
+              ],
+            }
+          : delta < 0
+            ? {
+                opacity: [0.9, 1, 1],
+                y: [10, -2, 0],
+                scale: [0.97, 1.05, 1],
+                color: ['#ff4d43', '#ff736b', '#ffffff'],
+                textShadow: [
+                  '0 0 0 rgba(255,77,67,0)',
+                  '0 0 6px rgba(255,77,67,0.1)',
+                  '0 0 0 rgba(255,77,67,0)',
+                ],
+              }
+            : {
+                opacity: 1,
+                y: 0,
+                scale: 1,
+                color: '#ffffff',
+                textShadow: '0 0 0 rgba(255,255,255,0)',
+              }
+      }
+      transition={{ duration: delta === 0 ? 0.2 : 0.7, ease: 'easeOut' }}
+    >
+      {children}
+    </motion.span>
+  )
+}
+
 function buildGroups(payload: LivePayload, pinned: string[]) {
   const isPinned = (game: LiveGame, index: number) => pinned.includes(gameKey(game, index))
   return {
@@ -39,7 +117,7 @@ function buildGroups(payload: LivePayload, pinned: string[]) {
       const leftPinned = isPinned(left, 0)
       const rightPinned = isPinned(right, 0)
       if (leftPinned !== rightPinned) return leftPinned ? -1 : 1
-      return magnitude(right) - magnitude(left)
+      return 0
     }),
     upcoming: [...payload.upcoming].sort((left, right) => {
       const leftPinned = isPinned(left, 0)
@@ -55,10 +133,12 @@ function LiveCard({
   game,
   pinned,
   onTogglePin,
+  onCardClick,
 }: {
   game: LiveGame
   pinned: boolean
   onTogglePin: () => void
+  onCardClick: () => void
 }) {
   const pregameHomeProb = game.pregame_home_prob == null ? null : Number(game.pregame_home_prob)
   const pregameAwayProb = game.pregame_away_prob != null
@@ -69,13 +149,18 @@ function LiveCard({
   const edgeValue = Number(game.live_home_edge ?? game.live_away_edge ?? game.edge ?? 0)
   const awayKalshi = game.kalshi_away_prob == null ? null : Number(game.kalshi_away_prob)
   const homeKalshi = game.kalshi_home_prob == null ? null : Number(game.kalshi_home_prob)
+  const latestPlay = (game.latest_play as { text?: string; clock?: string; period?: string } | undefined) ?? undefined
   const awayModelTone = comparisonTone(awayProb, homeProb)
   const homeModelTone = comparisonTone(homeProb, awayProb)
   const awayKalshiTone = comparisonTone(awayKalshi, homeKalshi)
   const homeKalshiTone = comparisonTone(homeKalshi, awayKalshi)
 
   return (
-    <Surface className="live-card-modern">
+    <Surface className="live-card-modern live-card-modern--clickable" onClick={(e: React.MouseEvent) => {
+      // Don't navigate if user clicked on the pin button
+      if ((e.target as HTMLElement).closest('.icon-button')) return
+      onCardClick()
+    }}>
       <div className="live-card-modern__top">
         <div>
           <span className="section-kicker">{game.game_status_text ?? game.period_label ?? 'Live board'}</span>
@@ -95,18 +180,48 @@ function LiveCard({
         <div className="live-team">
           <TeamLogo team={game.away_team as string} size={36} />
           <span style={{ color: teamAccent((game.away_full_name ?? game.away_team) as string) }}>{game.away_team}</span>
-          <strong>{game.away_score ?? 0}</strong>
-          <small className={`live-prob live-prob--${awayModelTone}`}>{pct0(awayProb)}</small>
+          <strong>
+            <AnimatedScoreValue
+              numericValue={game.away_score ?? 0}
+            >
+              {game.away_score ?? 0}
+            </AnimatedScoreValue>
+          </strong>
+          <small className={`live-prob live-prob--${awayModelTone}`}>
+            <AnimatedLiveValue
+              valueKey={`away-prob-${game.game_id}-${awayProb.toFixed(4)}`}
+              className={`live-prob live-prob--${awayModelTone}`}
+            >
+              {pct0(awayProb)}
+            </AnimatedLiveValue>
+          </small>
         </div>
         <div className="live-card-modern__middle">
           <span>{game.period_label ?? game.game_status_text ?? 'Status'}</span>
-          <strong>{game.clock_display ?? '—'}</strong>
+          <strong>
+            <AnimatedLiveValue valueKey={`clock-${game.game_id}-${game.period_label ?? ''}-${game.clock_display ?? 'na'}`}>
+              {game.clock_display ?? '—'}
+            </AnimatedLiveValue>
+          </strong>
         </div>
         <div className="live-team live-team--right">
           <TeamLogo team={game.home_team as string} size={36} />
           <span style={{ color: teamAccent((game.home_full_name ?? game.home_team) as string) }}>{game.home_team}</span>
-          <strong>{game.home_score ?? 0}</strong>
-          <small className={`live-prob live-prob--${homeModelTone}`}>{pct0(homeProb)}</small>
+          <strong>
+            <AnimatedScoreValue
+              numericValue={game.home_score ?? 0}
+            >
+              {game.home_score ?? 0}
+            </AnimatedScoreValue>
+          </strong>
+          <small className={`live-prob live-prob--${homeModelTone}`}>
+            <AnimatedLiveValue
+              valueKey={`home-prob-${game.game_id}-${homeProb.toFixed(4)}`}
+              className={`live-prob live-prob--${homeModelTone}`}
+            >
+              {pct0(homeProb)}
+            </AnimatedLiveValue>
+          </small>
         </div>
       </div>
 
@@ -115,27 +230,76 @@ function LiveCard({
           <div>
             <span>Pregame model</span>
             <strong className="live-marketline">
-              <b className={`live-prob live-prob--${comparisonTone(pregameAwayProb, pregameHomeProb)}`}>{pct0(pregameAwayProb)}</b>
+              <b className={`live-prob live-prob--${comparisonTone(pregameAwayProb, pregameHomeProb)}`}>
+                <AnimatedLiveValue
+                  valueKey={`pregame-away-${game.game_id}-${pregameAwayProb.toFixed(4)}`}
+                  className={`live-prob live-prob--${comparisonTone(pregameAwayProb, pregameHomeProb)}`}
+                >
+                  {pct0(pregameAwayProb)}
+                </AnimatedLiveValue>
+              </b>
               <i>/</i>
-              <b className={`live-prob live-prob--${comparisonTone(pregameHomeProb, pregameAwayProb)}`}>{pct0(pregameHomeProb)}</b>
+              <b className={`live-prob live-prob--${comparisonTone(pregameHomeProb, pregameAwayProb)}`}>
+                <AnimatedLiveValue
+                  valueKey={`pregame-home-${game.game_id}-${(pregameHomeProb ?? 0).toFixed(4)}`}
+                  className={`live-prob live-prob--${comparisonTone(pregameHomeProb, pregameAwayProb)}`}
+                >
+                  {pct0(pregameHomeProb)}
+                </AnimatedLiveValue>
+              </b>
             </strong>
           </div>
         )}
         <div>
           <span>Kalshi</span>
           <strong className="live-marketline">
-            <b className={`live-prob live-prob--${awayKalshiTone}`}>{pct0(awayKalshi)}</b>
+            <b className={`live-prob live-prob--${awayKalshiTone}`}>
+              <AnimatedLiveValue
+                valueKey={`kalshi-away-${game.game_id}-${awayKalshi ?? 'na'}`}
+                className={`live-prob live-prob--${awayKalshiTone}`}
+              >
+                {pct0(awayKalshi)}
+              </AnimatedLiveValue>
+            </b>
             <i>/</i>
-            <b className={`live-prob live-prob--${homeKalshiTone}`}>{pct0(homeKalshi)}</b>
+            <b className={`live-prob live-prob--${homeKalshiTone}`}>
+              <AnimatedLiveValue
+                valueKey={`kalshi-home-${game.game_id}-${homeKalshi ?? 'na'}`}
+                className={`live-prob live-prob--${homeKalshiTone}`}
+              >
+                {pct0(homeKalshi)}
+              </AnimatedLiveValue>
+            </b>
           </strong>
         </div>
         <div>
           <span>Pred score</span>
           <strong>
-            {game.pred_away_score ?? '—'} - {game.pred_home_score ?? '—'}
+            <AnimatedLiveValue
+              valueKey={`pred-score-${game.game_id}-${game.pred_away_score ?? 'na'}-${game.pred_home_score ?? 'na'}`}
+              className="live-pred-score-value"
+            >
+              {game.pred_away_score ?? '—'} - {game.pred_home_score ?? '—'}
+            </AnimatedLiveValue>
           </strong>
         </div>
       </div>
+
+      {latestPlay?.text ? (
+        <motion.div
+          key={`latest-play-${game.game_id}-${latestPlay.text}-${latestPlay.clock ?? 'na'}`}
+          className="live-card-modern__play"
+          initial={{ opacity: 0.45, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.32, ease: 'easeOut' }}
+        >
+          <span className="live-card-modern__play-label">
+            {latestPlay.period ?? game.period_label ?? 'Live'}
+            {latestPlay.clock ? ` · ${latestPlay.clock}` : ''}
+          </span>
+          <strong>{latestPlay.text}</strong>
+        </motion.div>
+      ) : null}
     </Surface>
   )
 }
@@ -143,6 +307,7 @@ function LiveCard({
 export default function LivePage() {
   const params = useParams()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const league: League = isLeague(params.league) ? params.league : normalizeLeague(params.league)
   const [autoRefresh, setAutoRefresh] = usePersistentState(`isotonic:${league}:live-refresh`, true)
   const [pinnedGames, setPinnedGames] = usePersistentState<string[]>(`isotonic:${league}:pinned-games`, [])
@@ -150,7 +315,7 @@ export default function LivePage() {
   const liveQuery = useQuery({
     queryKey: ['live', league],
     queryFn: () => getLive(league),
-    refetchInterval: autoRefresh ? 5_000 : false,
+    refetchInterval: autoRefresh ? 2_000 : false,
   })
 
   useEffect(() => {
@@ -172,8 +337,8 @@ export default function LivePage() {
     return buildGroups(liveQuery.data, pinnedGames)
   }, [liveQuery.data, pinnedGames])
 
-  if (liveQuery.isLoading) return <LoadingPanel label="Syncing the live board" />
-  if (liveQuery.isError || !liveQuery.data || !groups) {
+  if (liveQuery.isLoading && !liveQuery.data) return <LoadingPanel label="Syncing the live board" />
+  if (!liveQuery.data || !groups) {
     return <ErrorState title="Live board unavailable" body="The live endpoint did not return a usable payload." />
   }
 
@@ -230,6 +395,7 @@ export default function LivePage() {
                           games.includes(key) ? games.filter((entry) => entry !== key) : [...games, key],
                         )
                       }
+                      onCardClick={() => navigate(`/app/${league}/live/${game.game_id}`)}
                     />
                   </motion.div>
                 )
@@ -245,7 +411,7 @@ export default function LivePage() {
               <strong>{groups.upcoming.length}</strong>
             </div>
             <div className="live-board live-board--auto">
-              {groups.upcoming.slice(0, 8).map((game, index) => {
+              {groups.upcoming.map((game, index) => {
                 const key = gameKey(game, index)
                 return (
                   <LiveCard
@@ -257,6 +423,7 @@ export default function LivePage() {
                         games.includes(key) ? games.filter((entry) => entry !== key) : [...games, key],
                       )
                     }
+                    onCardClick={() => navigate(`/app/${league}/live/${game.game_id}`)}
                   />
                 )
               })}
@@ -271,7 +438,7 @@ export default function LivePage() {
               <strong>{groups.finals.length}</strong>
             </div>
             <div className="live-board live-board--auto">
-              {groups.finals.slice(0, 6).map((game, index) => {
+              {groups.finals.map((game, index) => {
                 const key = gameKey(game, index)
                 return (
                   <LiveCard
@@ -283,6 +450,7 @@ export default function LivePage() {
                         games.includes(key) ? games.filter((entry) => entry !== key) : [...games, key],
                       )
                     }
+                    onCardClick={() => navigate(`/app/${league}/live/${game.game_id}`)}
                   />
                 )
               })}

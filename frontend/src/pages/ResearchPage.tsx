@@ -9,7 +9,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { Activity, Trophy } from 'lucide-react'
+import { BarChart3, Shield, Swords, TrendingUp, Trophy, Zap } from 'lucide-react'
 import { useParams } from 'react-router-dom'
 
 import { EmptyState, ErrorState, LoadingPanel, MetricCard, Pill, Surface, TeamLogo } from '../components/ui'
@@ -17,7 +17,6 @@ import {
   getBracket,
   getMatchup,
   getMatchupTeams,
-  getNcaabTeams,
   getTeamExplorer,
   getTeamExplorerTeams,
 } from '../lib/api'
@@ -26,7 +25,7 @@ import { isLeague, leagueLabels, normalizeLeague } from '../lib/navigation'
 import { teamAccent } from '../lib/teamColor'
 
 import { usePersistentState } from '../hooks/usePersistentState'
-import type { League, MatchupResponse, NcaabTeamRecord, TeamExplorerResponse } from '../types'
+import type { AdvancementRow, League, MatchupResponse, TeamExplorerResponse } from '../types'
 
 type ResearchTab = 'matchup' | 'teams' | 'bracket'
 
@@ -82,6 +81,182 @@ function TeamSelector({
   )
 }
 
+/* ── Stat comparison row renderer ────────────────────────── */
+type CompRow = [string, number | string | null | undefined, number | string | null | undefined, boolean?]
+
+function ComparisonBlock({
+  title,
+  icon,
+  rows,
+  teamAColor,
+  teamBColor,
+  format: fmt = 'num',
+}: {
+  title: string
+  icon: React.ReactNode
+  rows: CompRow[]
+  teamAColor: string
+  teamBColor: string
+  format?: 'num' | 'pct'
+}) {
+  const display = (v: number | string | null | undefined) => {
+    if (v == null) return '—'
+    const n = Number(v)
+    if (Number.isNaN(n)) return String(v)
+    if (fmt === 'pct') return pct(n)
+    return num(n)
+  }
+
+  return (
+    <Surface className="stack-panel">
+      <div className="stack-panel__header">
+        <div>
+          <h3>{title}</h3>
+        </div>
+        {icon}
+      </div>
+      <div className="comparison-table">
+        {rows
+          .filter(([, left, right]) => left != null || right != null)
+          .map(([label, left, right, lowerBetter]) => {
+            const vA = Number(left ?? 0)
+            const vB = Number(right ?? 0)
+            const shift = Math.min(vA, vB, 0) - 0.001
+            const sA = vA - shift
+            const sB = vB - shift
+            const total = sA + sB
+            const shareA = total > 0 ? (sA / total) * 100 : 50
+            const shareB = 100 - shareA
+            const aWins = lowerBetter ? vA < vB : vA > vB
+            const bWins = lowerBetter ? vB < vA : vB > vA
+            return (
+              <div className="comparison-table__row" key={String(label)}>
+                <span
+                  className="comparison-table__value"
+                  style={{ color: aWins ? 'var(--good)' : bWins ? 'var(--bad)' : 'var(--text)' }}
+                >
+                  {display(left)}
+                </span>
+                <div>
+                  <small>{label}</small>
+                  <div className="comparison-table__track comparison-table__track--split">
+                    <i style={{ width: `${shareA}%`, background: teamAColor }} />
+                    <i style={{ width: `${shareB}%`, background: teamBColor }} />
+                  </div>
+                </div>
+                <span
+                  className="comparison-table__value"
+                  style={{ color: bWins ? 'var(--good)' : aWins ? 'var(--bad)' : 'var(--text)' }}
+                >
+                  {display(right)}
+                </span>
+              </div>
+            )
+          })}
+      </div>
+    </Surface>
+  )
+}
+
+function FormTable({
+  team,
+  form,
+}: {
+  team: string
+  form: Array<Record<string, number | string>>
+}) {
+  if (!form.length) return null
+  const recent = form.slice(-8).reverse()
+  const wins = recent.filter((g) => Number(g.win) === 1).length
+  const losses = recent.length - wins
+
+  return (
+    <Surface className="stack-panel">
+      <div className="stack-panel__header">
+        <div>
+          <span className="section-kicker">Last {recent.length} games</span>
+          <h3>
+            <TeamLogo team={team} size={16} />
+            {team}{' '}
+            <span style={{ color: 'var(--text-secondary)', fontWeight: 400, fontSize: '0.85em' }}>
+              {wins}-{losses}
+            </span>
+          </h3>
+        </div>
+      </div>
+      <div className="form-table">
+        {recent.map((g, i) => {
+          const won = Number(g.win) === 1
+          return (
+            <div className={`form-table__row ${won ? 'is-win' : 'is-loss'}`} key={i}>
+              <span className="form-table__result" style={{ color: won ? 'var(--good)' : 'var(--bad)' }}>
+                {won ? 'W' : 'L'}
+              </span>
+              <span className="form-table__score">
+                {g.pts ?? '?'}-{g.opp_pts ?? '?'}
+              </span>
+              {g.opponent ? <span className="form-table__opp">{String(g.opponent).slice(0, 18)}</span> : null}
+              <span className="form-table__date">{formatDate(String(g.game_date ?? ''))}</span>
+            </div>
+          )
+        })}
+      </div>
+    </Surface>
+  )
+}
+
+function H2HTable({
+  teamA,
+  teamB,
+  h2h,
+  summary,
+}: {
+  teamA: string
+  teamB: string
+  h2h: Array<Record<string, number | string>>
+  summary: Record<string, number>
+}) {
+  if (!h2h.length) return null
+  const aWins = summary.a_wins ?? 0
+  const bWins = summary.b_wins ?? 0
+  const leader = aWins > bWins ? teamA : bWins > aWins ? teamB : 'Tied'
+
+  return (
+    <Surface className="stack-panel">
+      <div className="stack-panel__header">
+        <div>
+          <span className="section-kicker">Recent matchups</span>
+          <h3>
+            Head to head{' '}
+            <span style={{ color: 'var(--text-secondary)', fontWeight: 400, fontSize: '0.85em' }}>
+              {leader === 'Tied' ? `Tied ${aWins}-${bWins}` : `${leader} leads ${Math.max(aWins, bWins)}-${Math.min(aWins, bWins)}`}
+            </span>
+          </h3>
+        </div>
+      </div>
+      <div className="form-table">
+        {h2h
+          .slice()
+          .reverse()
+          .map((g, i) => {
+            const winner = String(g.winner ?? '')
+            return (
+              <div className="form-table__row" key={i}>
+                <span className="form-table__result" style={{ color: winner === teamA ? 'var(--good)' : 'var(--bad)' }}>
+                  {winner === teamA ? teamA : teamB}
+                </span>
+                <span className="form-table__score">
+                  {g.home_pts ?? '?'}-{g.away_pts ?? '?'}
+                </span>
+                <span className="form-table__date">{formatDate(String(g.game_date ?? ''))}</span>
+              </div>
+            )
+          })}
+      </div>
+    </Surface>
+  )
+}
+
 function MatchupSurface({ data, league }: { data: MatchupResponse; league: League }) {
   const teamA = String(data.team_a ?? 'Team A')
   const teamB = String(data.team_b ?? 'Team B')
@@ -90,29 +265,85 @@ function MatchupSurface({ data, league }: { data: MatchupResponse; league: Leagu
   const statsA = data.stats_a ?? {}
   const statsB = data.stats_b ?? {}
 
-  const rows =
+  const teamAColor = teamAccent(teamA)
+  const teamBColor = teamAccent(teamB)
+
+  /* ── Stat categories ── */
+  const overallRows: CompRow[] =
     league === 'nba'
       ? [
           ['Elo', statsA.elo, statsB.elo],
           ['Net rating', statsA.net_rtg, statsB.net_rtg],
-          ['Off rating', statsA.off_rtg, statsB.off_rtg],
-          ['Def rating', statsA.def_rtg, statsB.def_rtg, true],
-          ['Pace', statsA.pace, statsB.pace],
+          ['Win %', statsA.roll_10_win_pct ?? statsA.win_pct, statsB.roll_10_win_pct ?? statsB.win_pct],
+          ['Avg margin', statsA.point_diff, statsB.point_diff],
         ]
       : [
           ['Elo', statsA.elo, statsB.elo],
           ['Net rating', statsA.net_rtg, statsB.net_rtg],
-          ['Off rating', statsA.off_rtg, statsB.off_rtg],
-          ['Def rating', statsA.def_rtg, statsB.def_rtg, true],
           ['Win %', statsA.win_pct, statsB.win_pct],
+          ['Avg margin', statsA.avg_margin, statsB.avg_margin],
+          ['SRS', statsA.srs, statsB.srs],
+          ['SOS', statsA.sos, statsB.sos],
         ]
 
-  const teamAColor = teamAccent(teamA)
-  const teamBColor = teamAccent(teamB)
+  const offenseRows: CompRow[] =
+    league === 'nba'
+      ? [
+          ['Off rating', statsA.off_rtg, statsB.off_rtg],
+          ['EFG%', statsA.efg_pct, statsB.efg_pct],
+          ['TS%', statsA.ts_pct, statsB.ts_pct],
+          ['Pace', statsA.pace, statsB.pace],
+          ['FT rate', statsA.ft_rate, statsB.ft_rate],
+          ['TOV rate', statsA.tov_rate, statsB.tov_rate, true],
+        ]
+      : [
+          ['Off rating', statsA.off_rtg, statsB.off_rtg],
+          ['Avg pts for', statsA.avg_score_for, statsB.avg_score_for],
+          ['EFG%', statsA.efg, statsB.efg],
+          ['Pace', statsA.pace, statsB.pace],
+          ['3PT rate', statsA.fg3_rate, statsB.fg3_rate],
+          ['FT%', statsA.ft_pct, statsB.ft_pct],
+          ['AST rate', statsA.ast_rate, statsB.ast_rate],
+          ['TOV rate', statsA.tov_rate, statsB.tov_rate, true],
+        ]
 
+  const defenseRows: CompRow[] =
+    league === 'nba'
+      ? [
+          ['Def rating', statsA.def_rtg, statsB.def_rtg, true],
+          ['Opp EFG%', statsA.opp_efg_pct, statsB.opp_efg_pct, true],
+          ['Opp TOV rate', statsA.opp_tov_rate, statsB.opp_tov_rate],
+          ['DREB%', statsA.dreb_pct, statsB.dreb_pct],
+          ['OREB%', statsA.oreb_pct, statsB.oreb_pct],
+        ]
+      : [
+          ['Def rating', statsA.def_rtg, statsB.def_rtg, true],
+          ['Avg pts against', statsA.avg_score_against, statsB.avg_score_against, true],
+          ['Opp EFG%', statsA.opp_efg, statsB.opp_efg, true],
+          ['Opp TOV rate', statsA.opp_tov_rate, statsB.opp_tov_rate],
+          ['STL rate', statsA.stl_rate, statsB.stl_rate],
+          ['BLK rate', statsA.blk_rate, statsB.blk_rate],
+          ['DREB%', statsA.dreb_pct, statsB.dreb_pct],
+          ['OREB%', statsA.oreb_pct, statsB.oreb_pct],
+        ]
+
+  const formRows: CompRow[] =
+    league === 'ncaab'
+      ? [
+          ['Last 10 win %', statsA.last10_win_pct, statsB.last10_win_pct],
+          ['Last 10 margin', statsA.last10_margin, statsB.last10_margin],
+          ['Consistency (std)', statsA.std_margin, statsB.std_margin, true],
+          ['Median rank', statsA.median_rank, statsB.median_rank, true],
+          ['Best rank', statsA.best_rank, statsB.best_rank, true],
+        ]
+      : [
+          ['Win streak', statsA.win_streak, statsB.win_streak],
+          ['Rest days', statsA.rest_days, statsB.rest_days],
+        ]
+
+  /* ── Elo trajectory ── */
   const eloHistory = useMemo(() => {
     const rows = new Map<string, { game_date: string; teamAValue?: number; teamBValue?: number }>()
-
     for (const entry of data.elo_history_a ?? []) {
       const key = String(entry.game_date ?? '')
       if (!key) continue
@@ -120,7 +351,6 @@ function MatchupSurface({ data, league }: { data: MatchupResponse; league: Leagu
       if (entry.elo != null) current.teamAValue = Number(entry.elo)
       rows.set(key, current)
     }
-
     for (const entry of data.elo_history_b ?? []) {
       const key = String(entry.game_date ?? '')
       if (!key) continue
@@ -128,7 +358,6 @@ function MatchupSurface({ data, league }: { data: MatchupResponse; league: Leagu
       if (entry.elo != null) current.teamBValue = Number(entry.elo)
       rows.set(key, current)
     }
-
     return Array.from(rows.values()).sort((left, right) => String(left.game_date).localeCompare(String(right.game_date)))
   }, [data.elo_history_a, data.elo_history_b])
 
@@ -142,6 +371,7 @@ function MatchupSurface({ data, league }: { data: MatchupResponse; league: Leagu
 
   return (
     <div className="page-grid">
+      {/* ── Hero ── */}
       <Surface className="hero-panel hero-panel--matchup" tone="accent">
         <div className="hero-matchup">
           <div className="hero-matchup__team">
@@ -165,129 +395,143 @@ function MatchupSurface({ data, league }: { data: MatchupResponse; league: Leagu
           </p>
           <div className="hero-panel__chips">
             <Pill tone="accent">{data.prediction_source === 'full_model' ? 'Full model' : 'Current model'}</Pill>
-            {data.seed_baseline_prob != null ? <Pill>{pct(data.seed_baseline_prob)}</Pill> : null}
+            {data.seed_baseline_prob != null ? <Pill>Seed baseline {pct(data.seed_baseline_prob)}</Pill> : null}
+            {data.market_odds?.kalshi_a_prob != null ? (
+              <Pill>Kalshi {pct0(data.market_odds.kalshi_a_prob)}-{pct0(data.market_odds.kalshi_b_prob ?? 1 - (data.market_odds.kalshi_a_prob ?? 0.5))}</Pill>
+            ) : null}
           </div>
         </div>
       </Surface>
 
-      <div className="content-grid">
-        <Surface className="stack-panel">
-          <div className="stack-panel__header">
-            <div>
-              <span className="section-kicker">Head-to-head numbers</span>
-              <h3>Core comparison</h3>
-            </div>
-            <Activity size={16} />
+      {/* ── Narrative blurb ── */}
+      {data.narrative ? (
+        <Surface className="narrative-panel">
+          <div className="narrative-panel__header">
+            <span className="section-kicker">The model's take</span>
           </div>
-          <div className="comparison-table">
-            {rows.map(([label, left, right, lowerBetter]) => {
-              const vA = Number(left ?? 0)
-              const vB = Number(right ?? 0)
-              const shift = Math.min(vA, vB, 0) - 0.001
-              const sA = vA - shift, sB = vB - shift
-              const total = sA + sB
-              const shareA = total > 0 ? (sA / total) * 100 : 50
-              const shareB = 100 - shareA
-              const aWins = lowerBetter ? vA < vB : vA > vB
-              const bWins = lowerBetter ? vB < vA : vB > vA
-              return (
-                <div className="comparison-table__row" key={String(label)}>
-                  <span className="comparison-table__value" style={{ color: aWins ? 'var(--good)' : bWins ? 'var(--bad)' : 'var(--text)' }}>
-                    {typeof left === 'number' ? num(left) : '—'}
-                  </span>
-                  <div>
-                    <small>{label}</small>
-                    <div className="comparison-table__track comparison-table__track--split">
-                      <i style={{ width: `${shareA}%`, background: teamAColor }} />
-                      <i style={{ width: `${shareB}%`, background: teamBColor }} />
-                    </div>
-                  </div>
-                  <span className="comparison-table__value" style={{ color: bWins ? 'var(--good)' : aWins ? 'var(--bad)' : 'var(--text)' }}>
-                    {typeof right === 'number' ? num(right) : '—'}
-                  </span>
-                </div>
-              )
-            })}
-          </div>
+          {data.narrative.split('\n\n').map((para, i) => (
+            <p className="narrative-panel__text" key={i}>{para}</p>
+          ))}
+          {data.team_a_availability_summary && data.team_a_availability_summary !== 'No major availability flags' ? (
+            <p className="narrative-panel__availability">
+              <strong>{teamA}:</strong> {data.team_a_availability_summary}
+            </p>
+          ) : null}
+          {data.team_b_availability_summary && data.team_b_availability_summary !== 'No major availability flags' ? (
+            <p className="narrative-panel__availability">
+              <strong>{teamB}:</strong> {data.team_b_availability_summary}
+            </p>
+          ) : null}
         </Surface>
+      ) : null}
 
-        <Surface className="stack-panel">
-          <div className="stack-panel__header">
-            <div>
-              <span className="section-kicker">Form line</span>
-              <h3>Elo trajectory</h3>
-            </div>
-            <Pill>{leagueLabels[league]}</Pill>
-          </div>
-          {eloTrajectory.length ? (
-            <>
-              <div className="trajectory-legend">
-                <div className="trajectory-legend__item">
-                  <TeamLogo team={teamA} size={18} />
-                  <span className="trajectory-legend__line" style={{ background: teamAColor }} />
-                  <div>
-                    <small>{teamA}</small>
-                    <strong>{num(latestTeamAElo, 1)}</strong>
-                  </div>
-                </div>
-                <div className="trajectory-legend__item">
-                  <TeamLogo team={teamB} size={18} />
-                  <span className="trajectory-legend__line" style={{ background: teamBColor }} />
-                  <div>
-                    <small>{teamB}</small>
-                    <strong>{num(latestTeamBElo, 1)}</strong>
-                  </div>
-                </div>
-              </div>
-              <div className="trajectory-chart">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={eloTrajectory} margin={{ top: 8, right: 10, bottom: 0, left: -20 }}>
-                    <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                    <XAxis
-                      dataKey="game_date"
-                      tickFormatter={(value) => formatDate(String(value))}
-                      tickLine={false}
-                      axisLine={false}
-                      minTickGap={24}
-                      tick={{ fill: 'rgba(255,255,255,0.48)', fontSize: 11 }}
-                    />
-                    <YAxis
-                      tickLine={false}
-                      axisLine={false}
-                      width={44}
-                      tick={{ fill: 'rgba(255,255,255,0.48)', fontSize: 11 }}
-                      domain={['dataMin - 8', 'dataMax + 8']}
-                    />
-                    <Tooltip content={<TrajectoryTooltip />} />
-                    <Line
-                      type="monotone"
-                      dataKey="teamAValue"
-                      name={teamA}
-                      stroke={teamAColor}
-                      strokeWidth={3}
-                      dot={false}
-                      activeDot={{ r: 5, stroke: teamAColor, strokeWidth: 2, fill: '#0c0c0d' }}
-                      connectNulls
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="teamBValue"
-                      name={teamB}
-                      stroke={teamBColor}
-                      strokeWidth={3}
-                      dot={false}
-                      activeDot={{ r: 5, stroke: teamBColor, strokeWidth: 2, fill: '#0c0c0d' }}
-                      connectNulls
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </>
-          ) : (
-            <EmptyState title="No Elo history" body="Historical matchup context is not available for this pair yet." />
-          )}
-        </Surface>
+      {/* ── Stat comparison blocks ── */}
+      <div className="content-grid">
+        <ComparisonBlock
+          title="Overall"
+          icon={<BarChart3 size={16} />}
+          rows={overallRows}
+          teamAColor={teamAColor}
+          teamBColor={teamBColor}
+        />
+        <ComparisonBlock
+          title="Offense"
+          icon={<Swords size={16} />}
+          rows={offenseRows}
+          teamAColor={teamAColor}
+          teamBColor={teamBColor}
+        />
       </div>
+
+      <div className="content-grid">
+        <ComparisonBlock
+          title="Defense"
+          icon={<Shield size={16} />}
+          rows={defenseRows}
+          teamAColor={teamAColor}
+          teamBColor={teamBColor}
+        />
+        <ComparisonBlock
+          title="Form & momentum"
+          icon={<TrendingUp size={16} />}
+          rows={formRows}
+          teamAColor={teamAColor}
+          teamBColor={teamBColor}
+        />
+      </div>
+
+      {/* ── Elo trajectory ── */}
+      <Surface className="stack-panel">
+        <div className="stack-panel__header">
+          <div>
+            <span className="section-kicker">Season trajectory</span>
+            <h3>Elo rating over time</h3>
+          </div>
+          <Pill>{leagueLabels[league]}</Pill>
+        </div>
+        {eloTrajectory.length ? (
+          <>
+            <div className="trajectory-legend">
+              <div className="trajectory-legend__item">
+                <TeamLogo team={teamA} size={18} />
+                <span className="trajectory-legend__line" style={{ background: teamAColor }} />
+                <div>
+                  <small>{teamA}</small>
+                  <strong>{num(latestTeamAElo, 1)}</strong>
+                </div>
+              </div>
+              <div className="trajectory-legend__item">
+                <TeamLogo team={teamB} size={18} />
+                <span className="trajectory-legend__line" style={{ background: teamBColor }} />
+                <div>
+                  <small>{teamB}</small>
+                  <strong>{num(latestTeamBElo, 1)}</strong>
+                </div>
+              </div>
+            </div>
+            <div className="trajectory-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={eloTrajectory} margin={{ top: 8, right: 10, bottom: 0, left: -20 }}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis
+                    dataKey="game_date"
+                    tickFormatter={(value) => formatDate(String(value))}
+                    tickLine={false}
+                    axisLine={false}
+                    minTickGap={24}
+                    tick={{ fill: 'rgba(255,255,255,0.48)', fontSize: 11 }}
+                  />
+                  <YAxis
+                    tickLine={false}
+                    axisLine={false}
+                    width={44}
+                    tick={{ fill: 'rgba(255,255,255,0.48)', fontSize: 11 }}
+                    domain={['dataMin - 8', 'dataMax + 8']}
+                  />
+                  <Tooltip content={<TrajectoryTooltip />} />
+                  <Line type="monotone" dataKey="teamAValue" name={teamA} stroke={teamAColor} strokeWidth={3} dot={false} activeDot={{ r: 5, stroke: teamAColor, strokeWidth: 2, fill: '#0c0c0d' }} connectNulls />
+                  <Line type="monotone" dataKey="teamBValue" name={teamB} stroke={teamBColor} strokeWidth={3} dot={false} activeDot={{ r: 5, stroke: teamBColor, strokeWidth: 2, fill: '#0c0c0d' }} connectNulls />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </>
+        ) : (
+          <EmptyState title="No Elo history" body="Historical matchup context is not available for this pair yet." />
+        )}
+      </Surface>
+
+      {/* ── Recent form ── */}
+      {(data.form_a?.length || data.form_b?.length) ? (
+        <div className="content-grid">
+          {data.form_a?.length ? <FormTable team={teamA} form={data.form_a} /> : null}
+          {data.form_b?.length ? <FormTable team={teamB} form={data.form_b} /> : null}
+        </div>
+      ) : null}
+
+      {/* ── Head-to-head ── */}
+      {data.h2h?.length && data.h2h_summary ? (
+        <H2HTable teamA={teamA} teamB={teamB} h2h={data.h2h} summary={data.h2h_summary} />
+      ) : null}
     </div>
   )
 }
@@ -335,39 +579,73 @@ function NbaTeamExplorer({ data }: { data: TeamExplorerResponse }) {
   )
 }
 
-function NcaaTeamsTable({ teams }: { teams: NcaabTeamRecord[] }) {
+function NcaaTeamExplorer({ data }: { data: TeamExplorerResponse }) {
+  const eloValues = (data.elo_history ?? []).map((entry) => Number(entry.elo ?? 0))
+  const offenseValues = (data.rolling_form ?? []).map((entry) => Number(entry.roll_10_pts ?? 0))
+  const defenseValues = (data.rolling_form ?? []).map((entry) => Number(entry.roll_10_opp_pts ?? 0))
+
   return (
-    <Surface className="table-surface">
-      <table className="data-table-modern">
-        <thead>
-          <tr>
-            <th>Team</th>
-            <th>Seed</th>
-            <th>Elo</th>
-            <th>Win%</th>
-            <th>Net</th>
-            <th>Margin</th>
-          </tr>
-        </thead>
-        <tbody>
-          {teams.slice(0, 40).map((team) => (
-            <tr key={String(team.TeamName ?? team.team_name)}>
-              <td>
-                <div className="table-team">
-                  <TeamLogo team={String(team.TeamName ?? team.team_name)} size={18} />
-                  <span>{team.TeamName ?? team.team_name}</span>
-                </div>
-              </td>
-              <td>{team.Seed ?? team.seed_num ?? '—'}</td>
-              <td>{integer(team.elo as number)}</td>
-              <td>{pct(team.win_pct as number)}</td>
-              <td>{num(team.net_rtg as number)}</td>
-              <td>{num(team.avg_margin as number)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </Surface>
+    <div className="page-grid">
+      <div className="metric-grid">
+        <MetricCard label="Current Elo" value={integer(data.current_elo)} />
+        <MetricCard
+          label={`Record (${data.record_season ?? 'season'})`}
+          value={`${data.season_record?.wins ?? 0}-${data.season_record?.losses ?? 0}`}
+        />
+        <MetricCard label="Win rate" value={pct(data.win_pct)} />
+        <MetricCard label="Seed" value={String(data.seed ?? '—')} />
+        <MetricCard label="Net rating" value={num(data.net_rtg)} />
+        <MetricCard label="Avg margin" value={num(data.avg_margin)} />
+      </div>
+
+      <div className="content-grid">
+        <Surface className="stack-panel">
+          <div className="stack-panel__header">
+            <div>
+              <span className="section-kicker">Season line</span>
+              <h3>Elo history</h3>
+            </div>
+          </div>
+          <svg className="sparkline-chart" viewBox="0 0 260 88">
+            <path className="sparkline-chart__line" d={sparklinePath(eloValues)} />
+          </svg>
+        </Surface>
+        <Surface className="stack-panel">
+          <div className="stack-panel__header">
+            <div>
+              <span className="section-kicker">Trend line</span>
+              <h3>Rolling offense</h3>
+            </div>
+          </div>
+          <svg className="sparkline-chart" viewBox="0 0 260 88">
+            <path className="sparkline-chart__line sparkline-chart__line--subtle" d={sparklinePath(offenseValues)} />
+          </svg>
+        </Surface>
+      </div>
+
+      <div className="metric-grid">
+        <MetricCard label="Off rating" value={num(data.off_rtg)} />
+        <MetricCard label="Def rating" value={num(data.def_rtg)} />
+        <MetricCard label="Last 10 win %" value={pct(data.last10_win_pct)} />
+        <MetricCard label="Last 10 margin" value={num(data.last10_margin)} />
+        <MetricCard label="Median rank" value={integer(data.median_rank)} />
+        <MetricCard label="Best rank" value={integer(data.best_rank)} />
+      </div>
+
+      <div className="content-grid">
+        <Surface className="stack-panel">
+          <div className="stack-panel__header">
+            <div>
+              <span className="section-kicker">Trend line</span>
+              <h3>Rolling defense</h3>
+            </div>
+          </div>
+          <svg className="sparkline-chart" viewBox="0 0 260 88">
+            <path className="sparkline-chart__line sparkline-chart__line--subtle" d={sparklinePath(defenseValues)} />
+          </svg>
+        </Surface>
+      </div>
+    </div>
   )
 }
 
@@ -444,13 +722,15 @@ function BracketTeamRow({
   const winner = String(row.winner_name ?? '')
   const isWinner = winner === team
   const winProb = bracketTeamWinProb(row, side)
+  const isUpset = isWinner && Boolean(row.is_upset)
 
   return (
-    <div className={`tournament-match__team ${isWinner ? 'is-winner' : winner ? 'is-loser' : ''}`}>
+    <div className={`tournament-match__team ${isWinner ? 'is-winner' : winner ? 'is-loser' : ''} ${isUpset ? 'is-upset' : ''}`}>
       <div className="tournament-match__team-main">
         <span className="tournament-match__seed">{seed ?? '—'}</span>
         <TeamLogo team={team} size={16} className="tournament-match__logo" />
         <span className="tournament-match__name">{team}</span>
+        {isUpset ? <Zap size={12} className="tournament-match__upset-icon" /> : null}
       </div>
       <span className="tournament-match__prob">{winProb != null ? pct0(winProb) : '—'}</span>
     </div>
@@ -539,7 +819,76 @@ function CenterMatch({
   )
 }
 
-function BracketBoard({ rows }: { rows: BracketRow[] }) {
+function ContendersTable({ advancement }: { advancement: AdvancementRow[] }) {
+  const top = advancement.slice(0, 16)
+  if (!top.length) return null
+
+  return (
+    <Surface className="stack-panel">
+      <div className="stack-panel__header">
+        <div>
+          <span className="section-kicker">Monte Carlo · 10,000 simulations</span>
+          <h3>Championship Contenders</h3>
+        </div>
+        <Trophy size={16} />
+      </div>
+      <div className="contenders-table">
+        <div className="contenders-table__header">
+          <span>Team</span>
+          <span>S16</span>
+          <span>E8</span>
+          <span>FF</span>
+          <span>Title</span>
+        </div>
+        {top.map((row) => (
+          <div className="contenders-table__row" key={row.TeamID}>
+            <div className="contenders-table__team">
+              <span className="contenders-table__seed">{row.seed_num}</span>
+              <TeamLogo team={row.TeamName} size={18} />
+              <span>{row.TeamName}</span>
+            </div>
+            <span>{pct0(row['Sweet 16'])}</span>
+            <span>{pct0(row['Elite 8'])}</span>
+            <span>{pct0(row['Final Four'])}</span>
+            <span className="contenders-table__champ">{pct0(row.Championship)}</span>
+          </div>
+        ))}
+      </div>
+    </Surface>
+  )
+}
+
+function UpsetList({ rows }: { rows: BracketRow[] }) {
+  const upsets = rows.filter((row) => Boolean(row.is_upset))
+  if (!upsets.length) return null
+
+  return (
+    <Surface className="stack-panel">
+      <div className="stack-panel__header">
+        <div>
+          <span className="section-kicker">Model-predicted</span>
+          <h3>Upset Picks</h3>
+        </div>
+        <Zap size={16} />
+      </div>
+      <div className="upset-list">
+        {upsets.map((row, i) => (
+          <div className="upset-list__row" key={i}>
+            <Pill tone="accent">{String(row.round)}</Pill>
+            <div className="upset-list__matchup">
+              <strong>({row.winner_seed}) {String(row.winner_name)}</strong>
+              <span className="upset-list__over">over</span>
+              <span>({row.loser_seed}) {String(row.winner_name) === String(row.team_a_name) ? String(row.team_b_name) : String(row.team_a_name)}</span>
+            </div>
+            <span className="upset-list__prob">{pct0(Number(row.win_prob ?? 0.5))}</span>
+          </div>
+        ))}
+      </div>
+    </Surface>
+  )
+}
+
+function BracketBoard({ rows, advancement }: { rows: BracketRow[]; advancement?: AdvancementRow[] }) {
   const seedLookup = useMemo(() => buildBracketSeedLookup(rows), [rows])
   const playInRows = rows.filter((row) => row.round === 'First Four')
   const semifinalRows = rows.filter((row) => row.round === 'Final Four')
@@ -548,63 +897,85 @@ function BracketBoard({ rows }: { rows: BracketRow[] }) {
   const championProb = titleRow
     ? bracketTeamWinProb(titleRow, champion === bracketTeamName(titleRow, 'a') ? 'a' : 'b')
     : null
+  const championAdvancement = advancement?.find((row) => row.TeamName === champion)
+  const champPctMc = championAdvancement?.Championship
+
+  const upsetCount = rows.filter((row) => Boolean(row.is_upset)).length
 
   return (
-    <Surface className="tournament-board" tone="accent">
-      <div className="tournament-board__hero">
-        <span className="section-kicker">Men&apos;s tournament</span>
-        <h2>Projected Bracket</h2>
-        <p>{champion !== 'Projected champion' ? `${champion} is the current model champion.` : 'Current simulated path through the field.'}</p>
-      </div>
-
-      {playInRows.length ? (
-        <div className="tournament-playins">
-          <span className="tournament-playins__label">First Four</span>
-          <div className="tournament-playins__list">
-            {playInRows.map((row, index) => (
-              <div className="tournament-playins__card" key={`playin-${index}`}>
-                <BracketTeamRow row={row} side="a" seedLookup={seedLookup} />
-                <BracketTeamRow row={row} side="b" seedLookup={seedLookup} />
-              </div>
-            ))}
-          </div>
+    <>
+      <Surface className="tournament-board" tone="accent">
+        <div className="tournament-board__hero">
+          <span className="section-kicker">Men&apos;s tournament · Monte Carlo bracket</span>
+          <h2>Projected Bracket</h2>
+          <p>
+            {champion !== 'Projected champion'
+              ? `${champion} is the model champion${champPctMc != null ? ` (${pct0(champPctMc)} title probability)` : ''}.`
+              : 'Current simulated path through the field.'}
+            {upsetCount > 0 ? ` ${upsetCount} upset${upsetCount > 1 ? 's' : ''} picked.` : ''}
+          </p>
         </div>
-      ) : null}
 
-      <div className="tournament-board__scroller">
-        <div className="tournament-board__builder">
-          <div className="tournament-board__side">
-            {BRACKET_REGION_SIDES.left.map((region) => (
-              <RegionBracket key={region} region={region} rows={rows} seedLookup={seedLookup} side="left" />
-            ))}
-          </div>
-
-          <div className="tournament-center">
-            {semifinalRows.map((row, index) => (
-              <CenterMatch key={`semifinal-${index}`} label="Final Four" row={row} seedLookup={seedLookup} />
-            ))}
-            {titleRow ? (
-              <CenterMatch label="National Championship" row={titleRow} seedLookup={seedLookup} tone="title" />
-            ) : null}
-            <div className="tournament-center__champion">
-            <div className="tournament-center__champion-badge">
-              <Trophy size={18} />
-              <span>Projected champion</span>
+        {playInRows.length ? (
+          <div className="tournament-playins">
+            <span className="tournament-playins__label">First Four</span>
+            <div className="tournament-playins__list">
+              {playInRows.map((row, index) => (
+                <div className="tournament-playins__card" key={`playin-${index}`}>
+                  <BracketTeamRow row={row} side="a" seedLookup={seedLookup} />
+                  <BracketTeamRow row={row} side="b" seedLookup={seedLookup} />
+                </div>
+              ))}
             </div>
-            <TeamLogo team={champion} size={34} />
-            <strong>{champion}</strong>
-            <p>{championProb != null ? `${pct0(championProb)} in the title matchup.` : 'Current title-game winner.'}</p>
           </div>
-          </div>
+        ) : null}
 
-          <div className="tournament-board__side">
-            {BRACKET_REGION_SIDES.right.map((region) => (
-              <RegionBracket key={region} region={region} rows={rows} seedLookup={seedLookup} side="right" />
-            ))}
+        <div className="tournament-board__scroller">
+          <div className="tournament-board__builder">
+            <div className="tournament-board__side">
+              {BRACKET_REGION_SIDES.left.map((region) => (
+                <RegionBracket key={region} region={region} rows={rows} seedLookup={seedLookup} side="left" />
+              ))}
+            </div>
+
+            <div className="tournament-center">
+              {semifinalRows.map((row, index) => (
+                <CenterMatch key={`semifinal-${index}`} label="Final Four" row={row} seedLookup={seedLookup} />
+              ))}
+              {titleRow ? (
+                <CenterMatch label="National Championship" row={titleRow} seedLookup={seedLookup} tone="title" />
+              ) : null}
+              <div className="tournament-center__champion">
+                <div className="tournament-center__champion-badge">
+                  <Trophy size={18} />
+                  <span>Projected champion</span>
+                </div>
+                <TeamLogo team={champion} size={34} />
+                <strong>{champion}</strong>
+                <p>
+                  {champPctMc != null
+                    ? `${pct0(champPctMc)} championship probability across 10K simulations.`
+                    : championProb != null
+                      ? `${pct0(championProb)} in the title matchup.`
+                      : 'Current title-game winner.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="tournament-board__side">
+              {BRACKET_REGION_SIDES.right.map((region) => (
+                <RegionBracket key={region} region={region} rows={rows} seedLookup={seedLookup} side="right" />
+              ))}
+            </div>
           </div>
         </div>
+      </Surface>
+
+      <div className="content-grid">
+        <UpsetList rows={rows} />
+        {advancement?.length ? <ContendersTable advancement={advancement} /> : null}
       </div>
-    </Surface>
+    </>
   )
 }
 
@@ -664,12 +1035,6 @@ export default function ResearchPage() {
     enabled: league === 'ncaab' && tab === 'bracket',
   })
 
-  const ncaabTeams = useQuery({
-    queryKey: ['ncaab-teams'],
-    queryFn: getNcaabTeams,
-    enabled: league === 'ncaab' && tab === 'teams',
-  })
-
   if (matchupTeams.isLoading) return <LoadingPanel label="Preparing the research deck" />
   if (matchupTeams.isError) {
     return <ErrorState title="Research unavailable" body="The available-team list could not be loaded from the API." />
@@ -724,12 +1089,24 @@ export default function ResearchPage() {
       ) : null}
 
       {tab === 'teams' && league === 'ncaab' ? (
-        ncaabTeams.isLoading ? (
-          <LoadingPanel label="Loading current team table" />
-        ) : ncaabTeams.isError || !ncaabTeams.data ? (
-          <ErrorState title="NCAA teams unavailable" body="The NCAA team feature table could not be loaded." />
+        explorerData.isLoading ? (
+          <LoadingPanel label="Loading team explorer" />
+        ) : explorerData.isError || !explorerData.data ? (
+          <ErrorState title="Team explorer unavailable" body="The team explorer payload could not be loaded." />
         ) : (
-          <NcaaTeamsTable teams={ncaabTeams.data.teams ?? []} />
+          <div className="page-grid">
+            <Surface className="filter-bar">
+              <div className="filter-bar__group">
+                <TeamSelector
+                  label="Team"
+                  value={teamExplorer}
+                  options={explorerTeams.data?.teams ?? []}
+                  onChange={setTeamExplorer}
+                />
+              </div>
+            </Surface>
+            <NcaaTeamExplorer data={explorerData.data as TeamExplorerResponse} />
+          </div>
         )
       ) : null}
 
@@ -739,7 +1116,7 @@ export default function ResearchPage() {
         ) : bracket.isError || !bracket.data ? (
           <ErrorState title="Bracket unavailable" body="The current projected bracket could not be loaded." />
         ) : (
-          <BracketBoard rows={bracket.data.bracket ?? []} />
+          <BracketBoard rows={bracket.data.bracket ?? []} advancement={bracket.data.advancement} />
         )
       ) : null}
     </div>

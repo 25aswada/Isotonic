@@ -293,7 +293,8 @@ button { cursor: pointer; }
   box-shadow: none;
   overflow: visible;
 }
-.brandmark__glyph svg { display: block; width: 100%; height: 100%; }
+.brandmark__glyph img,
+.brandmark__glyph svg { display: block; width: 100%; height: 100%; object-fit: contain; }
 .brandmark__copy { display: grid; gap: 0; }
 .brandmark__copy strong {
   font-size: 1.2rem;
@@ -452,6 +453,8 @@ button { cursor: pointer; }
   transition: color 0.18s, background 0.18s;
 }
 .app-rail__collapse:hover, .icon-button:hover { background: var(--panel-soft); color: var(--text); }
+.icon-button--danger { color: var(--text-dim); }
+.icon-button--danger:hover { background: rgba(255,69,58,0.15); color: var(--bad); }
 
 .app-rail__utility {
   border: none;
@@ -933,7 +936,26 @@ button { cursor: pointer; }
 }
 .live-team, .live-card-modern__middle { display: grid; gap: 6px; }
 .live-team--right { text-align: right; justify-items: end; }
-.live-team strong { font-size: 2.4rem; letter-spacing: -0.06em; font-weight: 700; line-height: 1; }
+.live-team strong {
+  font-size: 2.4rem;
+  letter-spacing: -0.06em;
+  font-weight: 700;
+  line-height: 1;
+  color: #ffffff !important;
+}
+.live-score-value {
+  color: #ffffff !important;
+  display: inline-block;
+  will-change: transform, color, text-shadow;
+}
+.live-score-value--up,
+.live-score-value--down,
+.live-score-value--steady {
+  color: #ffffff !important;
+}
+.live-pred-score-value {
+  color: #ffffff !important;
+}
 .live-team small { font-family: var(--font-data); font-size: 0.78rem; }
 .live-prob {
   font-family: var(--font-data);
@@ -942,15 +964,37 @@ button { cursor: pointer; }
   letter-spacing: 0.01em;
 }
 .live-team small.live-prob--good,
-.live-prob--good { color: var(--good); }
+.live-marketline .live-prob--good,
+.live-prob--good { color: var(--good) !important; }
 .live-team small.live-prob--bad,
-.live-prob--bad { color: var(--bad); }
+.live-marketline .live-prob--bad,
+.live-prob--bad { color: var(--bad) !important; }
 .live-team small.live-prob--neutral,
-.live-prob--neutral { color: var(--text); }
+.live-marketline .live-prob--neutral,
+.live-prob--neutral { color: var(--text) !important; }
 .live-card-modern__middle { text-align: center; }
 .live-card-modern__middle strong { font-size: 1.1rem; font-weight: 600; }
 .live-card-modern__meta { justify-content: space-between; flex-wrap: wrap; }
 .live-card-modern__meta div { display: grid; gap: 4px; }
+.live-card-modern__play {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+.live-card-modern__play-label {
+  color: var(--text-soft);
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.live-card-modern__play strong {
+  color: var(--text);
+  font-size: 0.98rem;
+  font-weight: 500;
+  line-height: 1.35;
+}
 .live-marketline {
   display: inline-flex;
   align-items: center;
@@ -963,6 +1007,123 @@ button { cursor: pointer; }
 .live-marketline i {
   color: var(--text-dim);
   font-style: normal;
+}
+
+/* Clickable live cards */
+.live-card-modern--clickable { cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+.live-card-modern--clickable:hover {
+  border-color: rgba(255,255,255,0.12);
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 4px 16px rgba(0,0,0,0.3);
+}
+
+/* ── Game Detail Page ──────────────────────────────────────────────────────── */
+.game-detail-back { margin-bottom: -8px; }
+
+.game-detail-hero { display: grid; gap: 20px; padding: 28px 32px; text-align: center; }
+.game-detail-hero__status {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  font-size: 0.85rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-soft);
+}
+.game-detail-hero__live-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #ef4444;
+  animation: live-pulse 1.5s ease-in-out infinite;
+}
+.game-detail-hero__live-text { color: #ef4444; }
+
+.game-detail-hero__teams {
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px;
+}
+.game-detail-hero__team {
+  display: flex; align-items: center; gap: 14px; justify-content: flex-end;
+}
+.game-detail-hero__team--right { justify-content: flex-start; }
+.game-detail-hero__team-info { display: grid; gap: 2px; }
+.game-detail-hero__team-info strong { font-size: 1.2rem; font-weight: 700; }
+.game-detail-hero__score {
+  font-size: 2.4rem; font-weight: 800; color: var(--text); line-height: 1;
+}
+.game-detail-hero__vs {
+  font-size: 0.85rem; color: var(--text-dim); font-weight: 500;
+}
+
+.game-detail-hero__probs {
+  display: flex; justify-content: center; gap: 28px; flex-wrap: wrap;
+}
+.game-detail-hero__prob-group { display: grid; gap: 6px; }
+.game-detail-hero__prob-label {
+  font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-dim);
+}
+.game-detail-hero__prob-row { display: flex; gap: 8px; }
+
+/* Chart card */
+/* Game detail surfaces — no hover lift */
+.game-detail-hero:hover,
+.game-detail-chart:hover,
+.game-detail-info__card:hover { transform: none; box-shadow: var(--shadow-sm); }
+
+/* Chart card — Kalshi-clean style */
+.game-detail-chart { padding: 16px 0 8px; overflow: visible; }
+.game-detail-chart__container { min-height: 360px; position: relative; overflow: visible; }
+.game-detail-chart__empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-height: 280px; gap: 8px; color: var(--text-dim); font-size: 0.9rem;
+}
+.game-detail-chart__empty p { margin: 0; }
+
+/* Edge labels — inside the chart's right margin */
+.game-detail-chart__edge-labels {
+  position: absolute; right: 6px; top: 16px; bottom: 28px;
+  width: 88px; pointer-events: none;
+}
+.game-detail-chart__edge-label {
+  position: absolute; right: 0;
+  transform: translateY(-50%);
+  display: flex; align-items: center; gap: 5px;
+  white-space: nowrap;
+}
+.game-detail-chart__edge-label--market {
+  opacity: 0.45;
+}
+.game-detail-chart__edge-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.game-detail-chart__edge-dot--market {
+  width: 6px; height: 6px; opacity: 0.5;
+}
+.game-detail-chart__edge-team {
+  font-size: 0.8rem; font-weight: 600;
+}
+.game-detail-chart__edge-pct {
+  font-size: 1.1rem; font-weight: 800; letter-spacing: -0.02em;
+}
+
+/* Info cards */
+.game-detail-info { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.game-detail-info__card { padding: 18px 20px; display: grid; gap: 6px; }
+.game-detail-info__card strong { font-size: 1rem; font-weight: 600; }
+
+/* Tooltip */
+.game-detail-tooltip {
+  background: rgba(20, 22, 28, 0.95); border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 10px; padding: 12px 16px; display: grid; gap: 6px;
+  font-size: 0.82rem; backdrop-filter: blur(8px);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+.game-detail-tooltip__time { color: var(--text-soft); font-weight: 600; font-size: 0.78rem; letter-spacing: 0.04em; }
+.game-detail-tooltip__score { color: var(--text); font-weight: 700; font-size: 0.9rem; }
+.game-detail-tooltip__divider { height: 1px; background: rgba(255,255,255,0.08); margin: 2px 0; }
+.game-detail-tooltip__row { display: flex; justify-content: space-between; gap: 20px; }
+.game-detail-tooltip__row strong { font-weight: 700; }
+
+/* recharts overrides for dark theme */
+.game-detail-chart .recharts-cartesian-grid line { stroke: rgba(255,255,255,0.05); }
+.game-detail-chart .recharts-tooltip-cursor { stroke: rgba(255,255,255,0.15); stroke-dasharray: 3 3; }
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 
 /* ── Comparison table ────────────────────────────────── */
@@ -995,6 +1156,64 @@ button { cursor: pointer; }
   border-radius: var(--radius-pill);
 }
 .comparison-table__track--split i { border-radius: 0; }
+
+/* ── Narrative panel ────────────────────────────────── */
+.narrative-panel {
+  padding: 20px 24px;
+}
+.narrative-panel__header { margin-bottom: 8px; }
+.narrative-panel__text {
+  font-size: 0.92rem;
+  line-height: 1.65;
+  color: var(--text);
+  margin: 0 0 10px;
+}
+.narrative-panel__text:last-of-type { margin-bottom: 0; }
+.narrative-panel__availability {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+.narrative-panel__availability strong { color: var(--text); }
+
+/* ── Form table ─────────────────────────────────────── */
+.form-table { display: grid; gap: 0; }
+.form-table__row {
+  display: grid;
+  grid-template-columns: 28px 64px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  font-size: 0.82rem;
+}
+.form-table__row:last-child { border-bottom: none; }
+.form-table__result {
+  font-family: var(--font-data);
+  font-weight: 700;
+  font-size: 0.78rem;
+  text-align: center;
+}
+.form-table__score {
+  font-family: var(--font-data);
+  color: var(--text);
+  font-size: 0.82rem;
+}
+.form-table__opp {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.form-table__date {
+  font-family: var(--font-data);
+  color: var(--text-soft);
+  font-size: 0.78rem;
+  text-align: right;
+}
 
 /* ── Sparkline ───────────────────────────────────────── */
 .sparkline-chart { width: 100%; height: 110px; }
@@ -1655,6 +1874,145 @@ button { cursor: pointer; }
 .metric-card__hint { color: var(--text-soft); font-size: 0.78rem; }
 
 /* ── Paper Trader ───────────────────────────────────── */
+
+.combo-builder {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.combo-builder__controls {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1.7fr) minmax(160px, 0.7fr);
+}
+
+.combo-builder__controls > div {
+  min-width: 0;
+}
+
+.combo-builder__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(340px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.combo-builder__selection,
+.combo-builder__ticket {
+  display: grid;
+  gap: 12px;
+}
+
+.combo-builder__selection-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.combo-builder__ticket {
+  position: sticky;
+  top: 106px;
+}
+
+.combo-builder__controls label {
+  display: block;
+  margin-bottom: 0.4rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.78rem;
+}
+
+.combo-builder__controls select,
+.combo-builder__controls input {
+  width: 100%;
+}
+
+.combo-builder__game {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.combo-builder__legs,
+.combo-leg-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.combo-builder__legs {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  max-height: 430px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.combo-leg-card,
+.combo-leg-pill {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 18px;
+}
+
+.combo-leg-card {
+  padding: 0.7rem 0.8rem;
+  display: grid;
+  gap: 0.12rem;
+  text-align: left;
+  min-height: 128px;
+  align-content: start;
+  overflow: hidden;
+}
+
+.combo-leg-card span,
+.combo-leg-pill span {
+  color: var(--text);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  hyphens: auto;
+}
+
+.combo-leg-card small {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.62rem;
+}
+
+.combo-leg-card strong,
+.combo-leg-pill strong {
+  color: var(--text-strong);
+  font-size: 0.95rem;
+  line-height: 1.1;
+}
+
+.combo-leg-card em {
+  font-style: normal;
+  font-size: 0.82rem;
+  margin-top: auto;
+  line-height: 1.1;
+}
+
+.combo-leg-card.is-active {
+  border-color: rgba(80, 227, 140, 0.45);
+  background: rgba(80, 227, 140, 0.08);
+}
+
+.combo-leg-pill {
+  padding: 0.45rem 0.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.84rem;
+}
+
+.combo-leg-list--ticket {
+  margin-bottom: 0.5rem;
+}
 .paper-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.72fr);
@@ -1713,6 +2071,295 @@ button { cursor: pointer; }
   color: var(--text-soft);
   font-size: 0.82rem;
   line-height: 1.55;
+}
+
+.paper-error-message {
+  color: var(--bad);
+  font-size: 0.82rem;
+}
+
+.paper-manual {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr);
+  gap: 16px;
+}
+
+.paper-manual__board,
+.paper-manual__ticket {
+  display: grid;
+  gap: 12px;
+}
+
+.paper-manual__board {
+  max-height: 480px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.paper-manual__game {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255,255,255,0.05);
+  background: rgba(255,255,255,0.025);
+  color: var(--text);
+  transition: border-color 0.18s, background 0.18s, transform 0.18s;
+}
+
+.paper-manual__game:hover,
+.paper-manual__game.is-selected {
+  border-color: var(--line-strong);
+  background: rgba(255,255,255,0.045);
+  transform: translateY(-1px);
+}
+
+.paper-manual__teams {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.paper-manual__game small {
+  color: var(--text-soft);
+  font-size: 0.76rem;
+}
+
+.paper-manual__controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.paper-manual__controls label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  font-size: 0.62rem;
+  font-weight: 700;
+}
+
+.paper-manual__controls input,
+.paper-manual__controls select {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1.5px solid #2a2a2e;
+  background: #1c1c1e;
+  color: var(--text);
+  font-size: 0.9rem;
+  transition: border-color 0.15s;
+}
+
+.paper-manual__controls input:focus,
+.paper-manual__controls select:focus {
+  outline: none;
+  border-color: #4a4a4e;
+}
+
+.paper-manual__money-input {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1.5px solid #2a2a2e;
+  background: #1c1c1e;
+  transition: border-color 0.15s;
+}
+
+.paper-manual__money-input:focus-within {
+  border-color: #4a4a4e;
+}
+
+.paper-manual__money-input span {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.paper-manual__money-input input {
+  min-height: 40px;
+  padding: 0 0 0 8px;
+  border: 0;
+  background: transparent;
+}
+
+.paper-manual__money-input input:focus {
+  border-color: transparent;
+}
+
+.paper-manual__side-picks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.paper-manual__side-picks button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1.5px solid #2a2a2e;
+  background: #1c1c1e;
+  color: #a1a1a6;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.paper-manual__side-picks button:hover:not(:disabled):not(.is-selected) {
+  background: #232326;
+  border-color: #3a3a3e;
+  color: var(--text);
+}
+
+.paper-manual__side-picks button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.paper-manual__side-picks button.is-selected {
+  border-color: var(--good);
+  background: rgba(76,217,100,0.1);
+  color: var(--good);
+}
+
+.paper-manual__empty {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.025);
+}
+
+.paper-manual__empty p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+
+/* ── Kalshi-style trade ticket ────────────────────────────────────────────── */
+.trade-ticket {
+  display: grid;
+  gap: 0;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  overflow: hidden;
+}
+
+.trade-ticket__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.trade-ticket__outcome { display: grid; gap: 4px; }
+.trade-ticket__label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); font-weight: 700; }
+.trade-ticket__team-row { display: flex; align-items: center; gap: 8px; }
+.trade-ticket__team-row strong { font-size: 0.98rem; letter-spacing: -0.02em; }
+
+.trade-ticket__price-hero {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 1px solid var(--line);
+}
+
+.trade-ticket__price-block {
+  display: grid;
+  gap: 4px;
+  padding: 12px 16px;
+  text-align: center;
+}
+
+.trade-ticket__price-block:first-child { border-right: 1px solid var(--line); }
+.trade-ticket__price-block span { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); font-weight: 700; }
+.trade-ticket__price-block strong { font-size: 1.32rem; font-weight: 800; letter-spacing: -0.03em; }
+.trade-ticket__price-block--price strong { color: color-mix(in srgb, var(--good) 80%, white); }
+.trade-ticket__price-block--contracts strong { color: color-mix(in srgb, var(--accent) 72%, white); }
+
+.trade-ticket__summary,
+.trade-ticket__payout {
+  display: grid;
+  gap: 0;
+  padding: 0 16px;
+}
+
+.trade-ticket__summary { padding-top: 14px; padding-bottom: 6px; }
+.trade-ticket__payout { padding-top: 6px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+
+.trade-ticket__row,
+.trade-ticket__payout-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 0;
+}
+
+.trade-ticket__row span,
+.trade-ticket__payout-row span { color: var(--text-soft); font-size: 0.85rem; }
+
+.trade-ticket__row strong,
+.trade-ticket__payout-row strong { font-size: 0.92rem; font-weight: 600; }
+
+.trade-ticket__row--total {
+  border-top: 1px solid rgba(255,255,255,0.06);
+  margin-top: 4px;
+  padding-top: 10px;
+}
+
+.trade-ticket__row--total strong { font-size: 1rem; font-weight: 700; }
+
+.trade-ticket__outlay { color: color-mix(in srgb, var(--warn) 68%, white) !important; }
+.trade-ticket__fee { color: var(--text-soft) !important; }
+.trade-ticket__total { color: color-mix(in srgb, var(--bad) 78%, white) !important; }
+.trade-ticket__win { color: var(--good) !important; }
+.trade-ticket__loss { color: var(--bad) !important; }
+.trade-ticket__edge { color: var(--good) !important; }
+.trade-ticket__market { color: color-mix(in srgb, var(--accent) 78%, white) !important; }
+.trade-ticket__breakeven { color: color-mix(in srgb, var(--warn) 78%, white) !important; }
+.trade-ticket__cash-after { color: color-mix(in srgb, var(--good) 72%, white) !important; }
+
+.trade-ticket__payout-row--dim span,
+.trade-ticket__payout-row--dim strong { opacity: 0.6; }
+
+.trade-ticket__probabilities {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  padding: 10px 16px;
+}
+
+.trade-ticket__prob {
+  display: grid;
+  gap: 3px;
+  text-align: center;
+}
+
+.trade-ticket__prob span { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); font-weight: 700; }
+.trade-ticket__prob strong { font-size: 0.88rem; font-weight: 600; }
+.trade-ticket__prob:first-child strong { color: color-mix(in srgb, var(--good) 78%, white); }
+
+.trade-ticket > .btn {
+  margin: 0 16px 16px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  min-height: 42px;
 }
 
 .paper-error-inline {
@@ -1978,8 +2625,13 @@ strong.paper-prob--neutral                        { color: var(--text-soft) !imp
 
 .position-row__stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+.position-row__delete {
+  align-self: center;
+  justify-self: end;
+  margin-top: 4px;
 }
 
 .paper-section-header {
@@ -2002,13 +2654,141 @@ strong.paper-prob--neutral                        { color: var(--text-soft) !imp
   }
 }
 
+/* ── Upset indicator on bracket team rows ─────────── */
+.tournament-match__team.is-upset .tournament-match__name {
+  color: var(--warn);
+}
+.tournament-match__upset-icon {
+  flex: 0 0 auto;
+  color: var(--warn);
+}
+
+/* ── Contenders table (Monte Carlo advancement probs) ── */
+.contenders-table {
+  display: grid;
+  gap: 0;
+  font-size: 0.78rem;
+}
+.contenders-table__header {
+  display: grid;
+  grid-template-columns: 1fr repeat(4, 56px);
+  gap: 6px;
+  padding: 8px 14px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.62rem;
+  font-weight: 700;
+  border-bottom: 1px solid var(--line);
+}
+.contenders-table__header span:not(:first-child) {
+  text-align: right;
+}
+.contenders-table__row {
+  display: grid;
+  grid-template-columns: 1fr repeat(4, 56px);
+  gap: 6px;
+  padding: 7px 14px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+.contenders-table__row:last-child {
+  border-bottom: none;
+}
+.contenders-table__row span {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text-soft);
+}
+.contenders-table__team {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.contenders-table__team span {
+  text-align: left;
+  color: var(--text);
+}
+.contenders-table__seed {
+  width: 16px;
+  flex: 0 0 16px;
+  color: var(--text-dim) !important;
+  font-size: 0.66rem;
+  text-align: right !important;
+}
+.contenders-table__champ {
+  color: var(--good) !important;
+  font-weight: 700;
+}
+
+/* ── Upset list (model-predicted upsets) ──────────── */
+.upset-list {
+  display: grid;
+  gap: 0;
+}
+.upset-list__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.upset-list__row:last-child {
+  border-bottom: none;
+}
+.upset-list__matchup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  font-size: 0.82rem;
+}
+.upset-list__matchup strong {
+  color: var(--warn);
+  font-weight: 700;
+}
+.upset-list__over {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.upset-list__prob {
+  flex: 0 0 auto;
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-soft);
+  font-size: 0.78rem;
+}
+
 @media (max-width: 960px) {
+  .combo-builder__layout,
+  .paper-manual,
+  .paper-manual__controls {
+    grid-template-columns: 1fr;
+  }
+
+  .combo-builder__ticket {
+    position: static;
+  }
+
   .paper-ticket__signal-row,
   .paper-ticket__metrics,
   .paper-ticket__detail-grid,
   .paper-auto__grid,
   .position-row__stats {
     grid-template-columns: 1fr;
+  }
+  .trade-ticket__probabilities {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+  .contenders-table__header,
+  .contenders-table__row {
+    grid-template-columns: 1fr repeat(4, 44px);
   }
 }
 

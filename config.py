@@ -32,6 +32,7 @@ LOG_DIR = "logs"
 DB_PATH = "data/nba.db"
 PREDICTION_LOG = "data/prediction_log.csv"
 PAPER_TRADES_CSV = "data/paper_trades.csv"
+PAPER_COMBO_TRADES_CSV = "data/paper_combo_trades.csv"
 MODEL_READY_CSV = "data/processed/model_ready.csv"
 ELO_CSV = "data/processed/elo_history.csv"
 MARKET_SNAPSHOTS_CSV = "data/market_snapshots.csv"
@@ -97,7 +98,11 @@ PAPER_MAX_STAKE_PCT = 0.10
 PAPER_ENTRY_SLIPPAGE_BPS = 20
 PAPER_EXIT_SLIPPAGE_BPS = 20
 PAPER_SPREAD_SLIPPAGE_FRACTION = 0.25
-LIVE_POLL_SECONDS = 30
+LIVE_POLL_SECONDS = 3
+COMBO_MAX_LEGS = 8
+COMBO_MIN_LEGS = 2
+COMBO_MARGIN_STD = 12.0
+COMBO_TOTAL_STD = 18.0
 
 # ── Auto Paper Trader ─────────────────────────────────────────────────────────
 AUTO_BET_MIN_EDGE     = 0.05   # minimum model edge to auto-place a paper trade

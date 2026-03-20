@@ -13,6 +13,8 @@ import requests
 
 import config
 
+from src.live_play_feed import get_latest_play
+from src.ncaab_availability import apply_ncaab_availability_adjustments
 from src.ncaab_live_model import (
     NCAAB_REGULATION_SECONDS,
     enrich_with_market_odds,
@@ -383,7 +385,13 @@ def fetch_ncaab_live_games() -> dict[str, list[dict]]:
             "kalshi_away_prob": None,
             "edge": None,
             "edge_team": None,
+            "latest_play": None,
         }
+
+        if game_status == 2:
+            latest_play = get_latest_play("ncaab", game_row["game_id"])
+            if latest_play:
+                game_row["latest_play"] = latest_play
 
         can_price_game = bool(
             season is not None
@@ -441,6 +449,35 @@ def fetch_ncaab_live_games() -> dict[str, list[dict]]:
         rows.append(game_row)
 
     live_df = pd.DataFrame(rows)
+    if not live_df.empty:
+        try:
+            live_df = apply_ncaab_availability_adjustments(
+                live_df,
+                team_a_col="home_all_team",
+                team_b_col="away_all_team",
+                prob_a_col="pregame_home_prob",
+                prob_b_col="pregame_away_prob",
+                prefix_a="home",
+                prefix_b="away",
+            )
+            for row in live_df.itertuples():
+                if pd.isna(getattr(row, "pregame_home_prob", np.nan)):
+                    continue
+                live_home_prob, live_away_prob = live_win_prob(
+                    getattr(row, "home_score", 0) or 0,
+                    getattr(row, "away_score", 0) or 0,
+                    getattr(row, "seconds_remaining", 0) or 0,
+                    home_elo=float(getattr(row, "home_elo", config.ELO_BASE) or config.ELO_BASE),
+                    away_elo=float(getattr(row, "away_elo", config.ELO_BASE) or config.ELO_BASE),
+                    pregame_home_prob=float(getattr(row, "pregame_home_prob")),
+                    neutral_site=bool(getattr(row, "neutral_site", False)),
+                )
+                live_df.at[row.Index, "live_home_prob"] = live_home_prob
+                live_df.at[row.Index, "live_away_prob"] = live_away_prob
+                live_df.at[row.Index, "home_win_prob"] = live_home_prob
+                live_df.at[row.Index, "away_win_prob"] = live_away_prob
+        except Exception as exc:
+            logger.warning("NCAA live availability adjustment skipped: %s", exc)
     if not live_df.empty and not odds_df.empty:
         live_df = enrich_with_market_odds(live_df, odds_df)
 

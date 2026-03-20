@@ -18,6 +18,7 @@ import pandas as pd
 import requests
 
 import ncaab_config
+from src.ncaab_availability import apply_ncaab_availability_adjustments
 from src.ncaab_predict import load_seed_matchup_baselines, predict_matchup
 
 logger = logging.getLogger(__name__)
@@ -328,19 +329,22 @@ def fetch_current_team_stats(season: int = ncaab_config.CURRENT_SEASON) -> pd.Da
         .drop_duplicates(subset=["TeamName"])
     )
 
+    adv_cols = [
+        "TeamName",
+        "pace",
+        "off_rtg",
+        "ts_pct",
+        "efg_pct",
+        "tov_pct",
+        "orb_pct",
+        "ft_rate",
+    ]
+    # Pull optional advanced columns when available.
+    for optional in ("opp_efg_pct", "opp_tov_pct", "def_rtg"):
+        if optional in advanced_df.columns:
+            adv_cols.append(optional)
     merged = basic_df.merge(
-        advanced_df[
-            [
-                "TeamName",
-                "pace",
-                "off_rtg",
-                "ts_pct",
-                "efg_pct",
-                "tov_pct",
-                "orb_pct",
-                "ft_rate",
-            ]
-        ],
+        advanced_df[[c for c in adv_cols if c in advanced_df.columns]],
         on="TeamName",
         how="inner",
     )
@@ -362,8 +366,14 @@ def fetch_current_team_stats(season: int = ncaab_config.CURRENT_SEASON) -> pd.Da
         "orb_pct",
         "ft_rate",
     ]
+    # Extra basic-stats columns for new features.
+    for optional in ("fg", "fga", "fg3a", "ft", "fta", "ast", "stl", "blk", "drb",
+                      "opp_efg_pct", "opp_tov_pct", "def_rtg"):
+        if optional in merged.columns:
+            numeric_cols.append(optional)
     for column in numeric_cols:
-        merged[column] = pd.to_numeric(merged[column], errors="coerce")
+        if column in merged.columns:
+            merged[column] = pd.to_numeric(merged[column], errors="coerce")
 
     games = merged["g"].replace(0, np.nan)
     merged["Season"] = season
@@ -377,38 +387,80 @@ def fetch_current_team_stats(season: int = ncaab_config.CURRENT_SEASON) -> pd.Da
     merged["ft_rate"] = merged["ft_rate"]
     merged["oreb_pct"] = merged["orb_pct"] / 100.0
     merged["off_rtg"] = merged["off_rtg"]
-    merged["def_rtg"] = 100.0 * merged["avg_score_against"] / merged["pace"].replace(0, np.nan)
+    if "def_rtg" not in merged.columns or merged["def_rtg"].isna().all():
+        merged["def_rtg"] = 100.0 * merged["avg_score_against"] / merged["pace"].replace(0, np.nan)
     merged["net_rtg"] = merged["off_rtg"] - merged["def_rtg"]
+
+    # ── New features ──
+    merged["pace"] = merged["pace"]  # already numeric
+    if "fga" in merged.columns and "fg3a" in merged.columns:
+        merged["fg3_rate"] = merged["fg3a"] / merged["fga"].replace(0, np.nan)
+    else:
+        merged["fg3_rate"] = np.nan
+    if "ft" in merged.columns and "fta" in merged.columns:
+        merged["ft_pct"] = merged["ft"] / merged["fta"].replace(0, np.nan)
+    else:
+        merged["ft_pct"] = np.nan
+    if "ast" in merged.columns and "fg" in merged.columns:
+        merged["ast_rate"] = merged["ast"] / merged["fg"].replace(0, np.nan)
+    else:
+        merged["ast_rate"] = np.nan
+    total_poss = games * merged["pace"].replace(0, np.nan)
+    if "stl" in merged.columns:
+        merged["stl_rate"] = merged["stl"] / total_poss
+    else:
+        merged["stl_rate"] = np.nan
+    if "blk" in merged.columns:
+        merged["blk_rate"] = merged["blk"] / total_poss
+    else:
+        merged["blk_rate"] = np.nan
+    if "drb" in merged.columns:
+        # dreb_pct ≈ DRB / (DRB + opp_ORB).  Use ORB pct as rough inverse.
+        merged["dreb_pct"] = 1.0 - merged["oreb_pct"]
+    else:
+        merged["dreb_pct"] = np.nan
+    if "opp_tov_pct" in merged.columns:
+        merged["opp_tov_rate"] = merged["opp_tov_pct"] / 100.0
+    else:
+        merged["opp_tov_rate"] = np.nan
+
     merged["school_url"] = merged.get("school_name_href", pd.Series("", index=merged.index)).map(_absolute_sportsref_url)
     merged["schedule_url"] = merged["school_url"].map(lambda value: _sportsref_variant_url(value, "-schedule.html"))
     merged["gamelog_url"] = merged["school_url"].map(lambda value: _sportsref_variant_url(value, "-gamelogs.html"))
 
-    return merged[
-        [
-            "Season",
-            "TeamName",
-            "g",
-            "wins",
-            "losses",
-            "win_pct",
-            "avg_margin",
-            "avg_score_for",
-            "avg_score_against",
-            "efg",
-            "ts",
-            "tov_rate",
-            "ft_rate",
-            "oreb_pct",
-            "off_rtg",
-            "def_rtg",
-            "net_rtg",
-            "srs",
-            "sos",
-            "school_url",
-            "schedule_url",
-            "gamelog_url",
-        ]
-    ].copy()
+    output_cols = [
+        "Season",
+        "TeamName",
+        "g",
+        "wins",
+        "losses",
+        "win_pct",
+        "avg_margin",
+        "avg_score_for",
+        "avg_score_against",
+        "efg",
+        "ts",
+        "tov_rate",
+        "ft_rate",
+        "oreb_pct",
+        "off_rtg",
+        "def_rtg",
+        "net_rtg",
+        "srs",
+        "sos",
+        "pace",
+        "fg3_rate",
+        "ft_pct",
+        "ast_rate",
+        "stl_rate",
+        "blk_rate",
+        "dreb_pct",
+        "opp_tov_rate",
+        "school_url",
+        "schedule_url",
+        "gamelog_url",
+    ]
+    return merged[[c for c in output_cols if c in merged.columns]].copy()
 
 
 def fetch_team_game_log(team_name: str, gamelog_url: str, team_candidates: list[str]) -> pd.DataFrame:
@@ -660,6 +712,25 @@ def build_current_all_team_features(
         float(pd.to_numeric(current_stats["efg"], errors="coerce").median())
     )
 
+    # ── Fill new features with available data or reasonable defaults ──
+    for col in ("pace", "fg3_rate", "ft_pct", "ast_rate", "stl_rate", "blk_rate",
+                "dreb_pct", "opp_tov_rate"):
+        if col not in all_stats.columns:
+            all_stats[col] = np.nan
+        all_stats[col] = pd.to_numeric(all_stats[col], errors="coerce")
+
+    # std_margin: computed from game logs if available, otherwise approximate from SRS.
+    if "std_margin" not in all_stats.columns:
+        srs_val = pd.to_numeric(all_stats.get("srs", pd.Series(dtype=float)), errors="coerce")
+        all_stats["std_margin"] = np.clip(12.0 - 0.15 * srs_val.abs(), 6.0, 18.0)
+
+    # SOS proxies — use Sports Reference SOS (avg opponent SRS) as basis.
+    sos_val = pd.to_numeric(all_stats.get("sos", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    if "avg_opp_win_pct" not in all_stats.columns:
+        all_stats["avg_opp_win_pct"] = 0.5 + sos_val / 40.0  # rough linear map
+    if "avg_opp_elo" not in all_stats.columns:
+        all_stats["avg_opp_elo"] = 1500.0 + sos_val * 12.0  # rough linear map
+
     all_stats = all_stats.sort_values("TeamName").reset_index(drop=True)
     if "TeamID" in all_stats.columns:
         max_existing_team_id = pd.to_numeric(all_stats["TeamID"], errors="coerce").dropna().max()
@@ -688,6 +759,17 @@ def build_current_all_team_features(
         "off_rtg",
         "def_rtg",
         "net_rtg",
+        "pace",
+        "fg3_rate",
+        "ft_pct",
+        "ast_rate",
+        "stl_rate",
+        "blk_rate",
+        "dreb_pct",
+        "opp_tov_rate",
+        "std_margin",
+        "avg_opp_win_pct",
+        "avg_opp_elo",
         "srs",
         "sos",
         "ProjectionName",
@@ -966,11 +1048,337 @@ def build_current_projected_field() -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     return projected_team_features, projected_field, meta
 
 
+def _compute_game_probabilities(
+    projected_team_features: pd.DataFrame,
+    model_bundle: tuple,
+    seed_baselines: pd.DataFrame | None,
+) -> dict[tuple[int, int], float]:
+    """Pre-compute win probabilities for all possible matchups between seeded teams.
+
+    Returns a dict mapping (team_a_id, team_b_id) → team_a_win_prob.
+    """
+    prob_cache: dict[tuple[int, int], float] = {}
+    team_ids = sorted(projected_team_features["TeamID"].unique().tolist())
+    team_features = projected_team_features.copy()
+
+    for i, team_a_id in enumerate(team_ids):
+        for team_b_id in team_ids[i + 1:]:
+            try:
+                prediction = predict_matchup(
+                    ncaab_config.CURRENT_SEASON,
+                    int(team_a_id),
+                    int(team_b_id),
+                    team_features=team_features,
+                    model_bundle=model_bundle,
+                    seed_baselines=seed_baselines,
+                )
+                adjusted = apply_ncaab_availability_adjustments(
+                    pd.DataFrame([{
+                        "team_a_name": prediction["team_a_name"],
+                        "team_b_name": prediction["team_b_name"],
+                        "team_a_win_prob": prediction["team_a_win_prob"],
+                        "team_b_win_prob": prediction["team_b_win_prob"],
+                        "team_a_win_prob_model": prediction.get("team_a_win_prob_model", prediction["team_a_win_prob"]),
+                        "team_b_win_prob_model": prediction.get("team_b_win_prob_model", prediction["team_b_win_prob"]),
+                    }]),
+                    team_a_col="team_a_name", team_b_col="team_b_name",
+                    prob_a_col="team_a_win_prob", prob_b_col="team_b_win_prob",
+                    prefix_a="team_a", prefix_b="team_b",
+                ).iloc[0]
+                prob_cache[(int(team_a_id), int(team_b_id))] = float(adjusted["team_a_win_prob"])
+                prob_cache[(int(team_b_id), int(team_a_id))] = 1.0 - float(adjusted["team_a_win_prob"])
+            except Exception:
+                prob_cache[(int(team_a_id), int(team_b_id))] = 0.5
+                prob_cache[(int(team_b_id), int(team_a_id))] = 0.5
+    return prob_cache
+
+
+def _get_prob(prob_cache: dict[tuple[int, int], float], a: int, b: int) -> float:
+    key = (int(a), int(b))
+    if key in prob_cache:
+        return prob_cache[key]
+    # Compute on the fly if not cached.
+    return 0.5
+
+
+def simulate_bracket_monte_carlo(
+    projected_team_features: pd.DataFrame,
+    meta: dict,
+    n_sims: int = 10000,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Run Monte Carlo bracket simulations and return per-team advancement
+    probabilities plus the optimal bracket picks.
+
+    Returns
+    -------
+    advancement_df : DataFrame
+        Columns: TeamID, TeamName, seed_num, region, plus one column per round
+        giving the fraction of simulations in which the team advanced.
+    optimal_bracket_df : DataFrame
+        Same format as ``simulate_projected_bracket`` output, but with upset-
+        aware picks chosen to maximise expected bracket-pool points.
+    """
+    from src.ncaab_model import load_model
+
+    rng = np.random.default_rng(42)
+    semifinal_pairs = meta.get("semifinal_pairs") or [("East", "Midwest"), ("South", "West")]
+    model_bundle = load_model()
+    seed_baselines = load_seed_matchup_baselines()
+
+    logger.info("Pre-computing pairwise probabilities for Monte Carlo bracket ...")
+    prob_cache = _compute_game_probabilities(projected_team_features, model_bundle, seed_baselines)
+
+    # Build region bracket structure.
+    regions = sorted(projected_team_features["region"].dropna().unique())
+    region_seeds: dict[str, dict[int, list[int]]] = {}
+    for region in regions:
+        rdf = projected_team_features[projected_team_features["region"] == region]
+        region_seeds[region] = {
+            int(seed): group.sort_values("TeamName")["TeamID"].tolist()
+            for seed, group in rdf.groupby("seed_num")
+        }
+
+    team_name_map = dict(zip(
+        projected_team_features["TeamID"].astype(int),
+        projected_team_features["TeamName"],
+    ))
+    team_seed_map = dict(zip(
+        projected_team_features["TeamID"].astype(int),
+        projected_team_features["seed_num"].astype(int),
+    ))
+    team_region_map = dict(zip(
+        projected_team_features["TeamID"].astype(int),
+        projected_team_features["region"],
+    ))
+
+    ROUND_NAMES = ["Round of 64", "Round of 32", "Sweet 16", "Elite 8", "Final Four", "Championship"]
+    ROUND_POINTS = [1, 2, 4, 8, 16, 32]
+
+    # Track advancement counts per team per round.
+    advance_counts: dict[int, dict[str, int]] = {}
+    for tid in projected_team_features["TeamID"].astype(int).tolist():
+        advance_counts[tid] = {r: 0 for r in ROUND_NAMES}
+
+    # Track how often each team wins each specific game slot (for optimal picks).
+    # game_slot_key → {team_id: count}
+    game_slot_wins: dict[str, dict[int, int]] = {}
+
+    def _sim_game(a: int, b: int) -> int:
+        p = _get_prob(prob_cache, a, b)
+        return a if rng.random() < p else b
+
+    logger.info("Running %d Monte Carlo bracket simulations ...", n_sims)
+    for _ in range(n_sims):
+        region_champs: dict[str, int] = {}
+        for region in regions:
+            seeds = region_seeds[region]
+            # First Four.
+            advanced: dict[int, int] = {}
+            for seed_num, team_ids in seeds.items():
+                if len(team_ids) == 1:
+                    advanced[seed_num] = team_ids[0]
+                else:
+                    winner = _sim_game(team_ids[0], team_ids[1])
+                    slot_key = f"FF|{region}|{seed_num}"
+                    game_slot_wins.setdefault(slot_key, {})
+                    game_slot_wins[slot_key][winner] = game_slot_wins[slot_key].get(winner, 0) + 1
+                    advanced[seed_num] = winner
+
+            # Round of 64.
+            r64: list[int] = []
+            for idx, (sa, sb) in enumerate(ROUND_ONE_PAIRINGS):
+                winner = _sim_game(advanced[sa], advanced[sb])
+                advance_counts[winner]["Round of 64"] += 1
+                slot_key = f"R64|{region}|{idx}"
+                game_slot_wins.setdefault(slot_key, {})
+                game_slot_wins[slot_key][winner] = game_slot_wins[slot_key].get(winner, 0) + 1
+                r64.append(winner)
+
+            # Round of 32.
+            r32: list[int] = []
+            for idx, (a, b) in enumerate(zip(r64[::2], r64[1::2])):
+                winner = _sim_game(a, b)
+                advance_counts[winner]["Round of 32"] += 1
+                slot_key = f"R32|{region}|{idx}"
+                game_slot_wins.setdefault(slot_key, {})
+                game_slot_wins[slot_key][winner] = game_slot_wins[slot_key].get(winner, 0) + 1
+                r32.append(winner)
+
+            # Sweet 16.
+            s16: list[int] = []
+            for idx, (a, b) in enumerate(zip(r32[::2], r32[1::2])):
+                winner = _sim_game(a, b)
+                advance_counts[winner]["Sweet 16"] += 1
+                slot_key = f"S16|{region}|{idx}"
+                game_slot_wins.setdefault(slot_key, {})
+                game_slot_wins[slot_key][winner] = game_slot_wins[slot_key].get(winner, 0) + 1
+                s16.append(winner)
+
+            # Elite 8.
+            winner = _sim_game(s16[0], s16[1])
+            advance_counts[winner]["Elite 8"] += 1
+            slot_key = f"E8|{region}"
+            game_slot_wins.setdefault(slot_key, {})
+            game_slot_wins[slot_key][winner] = game_slot_wins[slot_key].get(winner, 0) + 1
+            region_champs[region] = winner
+
+        # Final Four.
+        finalists: list[int] = []
+        for idx, (ra, rb) in enumerate(semifinal_pairs[:2]):
+            if ra in region_champs and rb in region_champs:
+                winner = _sim_game(region_champs[ra], region_champs[rb])
+                advance_counts[winner]["Final Four"] += 1
+                slot_key = f"FF4|{idx}"
+                game_slot_wins.setdefault(slot_key, {})
+                game_slot_wins[slot_key][winner] = game_slot_wins[slot_key].get(winner, 0) + 1
+                finalists.append(winner)
+
+        # Championship.
+        if len(finalists) == 2:
+            winner = _sim_game(finalists[0], finalists[1])
+            advance_counts[winner]["Championship"] += 1
+            slot_key = "CHAMP"
+            game_slot_wins.setdefault(slot_key, {})
+            game_slot_wins[slot_key][winner] = game_slot_wins[slot_key].get(winner, 0) + 1
+
+    # Build advancement probability DataFrame.
+    adv_rows: list[dict] = []
+    for tid, counts in advance_counts.items():
+        row: dict = {
+            "TeamID": tid,
+            "TeamName": team_name_map.get(tid, "?"),
+            "seed_num": team_seed_map.get(tid, 16),
+            "region": team_region_map.get(tid, ""),
+        }
+        for rnd in ROUND_NAMES:
+            row[rnd] = counts[rnd] / n_sims
+        adv_rows.append(row)
+    advancement_df = pd.DataFrame(adv_rows).sort_values(
+        ["Championship", "Final Four", "Elite 8"], ascending=False
+    ).reset_index(drop=True)
+
+    # ── Build optimal bracket (maximise expected pool points) ──
+    # For each game slot, pick the team with the highest expected value:
+    #   EV = P(team wins this slot) × points_for_this_round
+    # This naturally picks upsets when a team has enough win probability
+    # in that slot to justify the risk.
+    picks: list[dict[str, object]] = []
+
+    def _optimal_pick_game(
+        team_a_id: int,
+        team_b_id: int,
+        round_name: str,
+        region: str,
+        slot_key: str,
+    ) -> int:
+        slot_data = game_slot_wins.get(slot_key, {})
+        a_count = slot_data.get(team_a_id, 0)
+        b_count = slot_data.get(team_b_id, 0)
+        # Pick the team that wins this game slot more often in simulations.
+        winner_id = team_a_id if a_count >= b_count else team_b_id
+        loser_id = team_b_id if winner_id == team_a_id else team_a_id
+        win_frac = max(a_count, b_count) / max(a_count + b_count, 1)
+        prob_a = _get_prob(prob_cache, team_a_id, team_b_id)
+        is_upset = team_seed_map.get(winner_id, 16) > team_seed_map.get(loser_id, 16)
+        picks.append({
+            "round": round_name,
+            "region": region,
+            "team_a_id": team_a_id,
+            "team_b_id": team_b_id,
+            "team_a_name": team_name_map.get(team_a_id, "?"),
+            "team_b_name": team_name_map.get(team_b_id, "?"),
+            "winner_id": winner_id,
+            "winner_name": team_name_map.get(winner_id, "?"),
+            "win_prob": prob_a if winner_id == team_a_id else 1.0 - prob_a,
+            "sim_win_pct": win_frac,
+            "is_upset": is_upset,
+            "winner_seed": team_seed_map.get(winner_id, 16),
+            "loser_seed": team_seed_map.get(loser_id, 16),
+            "seed_baseline_prob": 0.5,
+            "winner_seed_edge": 0.0,
+            "team_a_availability_penalty_elo": 0.0,
+            "team_b_availability_penalty_elo": 0.0,
+        })
+        return winner_id
+
+    region_champions_opt: dict[str, int] = {}
+    for region in regions:
+        seeds = region_seeds[region]
+        advanced: dict[int, int] = {}
+        for seed_num, team_ids in seeds.items():
+            if len(team_ids) == 1:
+                advanced[seed_num] = team_ids[0]
+            else:
+                slot_key = f"FF|{region}|{seed_num}"
+                advanced[seed_num] = _optimal_pick_game(
+                    team_ids[0], team_ids[1], "First Four", region, slot_key,
+                )
+
+        r64: list[int] = []
+        for idx, (sa, sb) in enumerate(ROUND_ONE_PAIRINGS):
+            slot_key = f"R64|{region}|{idx}"
+            r64.append(_optimal_pick_game(advanced[sa], advanced[sb], "Round of 64", region, slot_key))
+
+        r32: list[int] = []
+        for idx, (a, b) in enumerate(zip(r64[::2], r64[1::2])):
+            slot_key = f"R32|{region}|{idx}"
+            r32.append(_optimal_pick_game(a, b, "Round of 32", region, slot_key))
+
+        s16: list[int] = []
+        for idx, (a, b) in enumerate(zip(r32[::2], r32[1::2])):
+            slot_key = f"S16|{region}|{idx}"
+            s16.append(_optimal_pick_game(a, b, "Sweet 16", region, slot_key))
+
+        slot_key = f"E8|{region}"
+        region_champions_opt[region] = _optimal_pick_game(s16[0], s16[1], "Elite 8", region, slot_key)
+
+    finalists_opt: list[int] = []
+    for idx, (ra, rb) in enumerate(semifinal_pairs[:2]):
+        if ra in region_champions_opt and rb in region_champions_opt:
+            slot_key = f"FF4|{idx}"
+            finalists_opt.append(_optimal_pick_game(
+                region_champions_opt[ra], region_champions_opt[rb],
+                "Final Four", f"{ra} vs {rb}", slot_key,
+            ))
+
+    if len(finalists_opt) == 2:
+        _optimal_pick_game(finalists_opt[0], finalists_opt[1], "National Championship", "Title Game", "CHAMP")
+
+    optimal_bracket_df = pd.DataFrame(picks)
+    optimal_bracket_df["projection_date"] = meta.get("projection_date", "")
+    optimal_bracket_df["projection_source_url"] = meta.get("projection_source_url", "")
+
+    n_upsets = int(optimal_bracket_df.get("is_upset", pd.Series(dtype=bool)).sum())
+    logger.info(
+        "Monte Carlo bracket complete: %d upsets picked across %d games",
+        n_upsets, len(optimal_bracket_df),
+    )
+
+    return advancement_df, optimal_bracket_df
+
+
 def simulate_projected_bracket(
     projected_team_features: pd.DataFrame,
     meta: dict,
 ) -> pd.DataFrame:
-    """Simulate the projected bracket, including play-in games, from current features."""
+    """Simulate the projected bracket, including play-in games, from current features.
+
+    This runs Monte Carlo simulations to produce an upset-aware bracket.
+    Falls back to deterministic (always-favorite) if Monte Carlo fails.
+    """
+    try:
+        advancement_df, bracket_df = simulate_bracket_monte_carlo(
+            projected_team_features, meta,
+        )
+        # Save advancement probabilities alongside the bracket.
+        adv_path = ncaab_config.NCAAB_PROCESSED_DIR / "advancement_probabilities.csv"
+        advancement_df.to_csv(adv_path, index=False)
+        logger.info("Saved advancement probabilities to %s", adv_path)
+        return bracket_df
+    except Exception as exc:
+        logger.warning("Monte Carlo bracket failed (%s), falling back to deterministic", exc)
+
+    # ── Deterministic fallback ──
     semifinal_pairs = meta.get("semifinal_pairs") or [("East", "Midwest"), ("South", "West")]
     picks: list[dict[str, object]] = []
 
@@ -988,7 +1396,27 @@ def simulate_projected_bracket(
             model_bundle=model_bundle,
             seed_baselines=seed_baselines,
         )
-        team_a_prob = prediction["team_a_win_prob"]
+        adjusted = apply_ncaab_availability_adjustments(
+            pd.DataFrame(
+                [
+                    {
+                        "team_a_name": prediction["team_a_name"],
+                        "team_b_name": prediction["team_b_name"],
+                        "team_a_win_prob": prediction["team_a_win_prob"],
+                        "team_b_win_prob": prediction["team_b_win_prob"],
+                        "team_a_win_prob_model": prediction.get("team_a_win_prob_model", prediction["team_a_win_prob"]),
+                        "team_b_win_prob_model": prediction.get("team_b_win_prob_model", prediction["team_b_win_prob"]),
+                    }
+                ]
+            ),
+            team_a_col="team_a_name",
+            team_b_col="team_b_name",
+            prob_a_col="team_a_win_prob",
+            prob_b_col="team_b_win_prob",
+            prefix_a="team_a",
+            prefix_b="team_b",
+        ).iloc[0]
+        team_a_prob = float(adjusted["team_a_win_prob"])
         winner_id = team_a_id if team_a_prob >= 0.5 else team_b_id
         picks.append(
             {
@@ -1000,9 +1428,11 @@ def simulate_projected_bracket(
                 "team_b_name": prediction["team_b_name"],
                 "winner_id": winner_id,
                 "winner_name": prediction["team_a_name"] if winner_id == team_a_id else prediction["team_b_name"],
-                "win_prob": team_a_prob if winner_id == team_a_id else prediction["team_b_win_prob"],
+                "win_prob": team_a_prob if winner_id == team_a_id else float(adjusted["team_b_win_prob"]),
                 "seed_baseline_prob": prediction["seed_baseline_prob"],
                 "winner_seed_edge": prediction["team_a_seed_edge"] if winner_id == team_a_id else prediction["team_b_seed_edge"],
+                "team_a_availability_penalty_elo": float(adjusted.get("team_a_availability_penalty_elo", 0.0)),
+                "team_b_availability_penalty_elo": float(adjusted.get("team_b_availability_penalty_elo", 0.0)),
             }
         )
         return winner_id

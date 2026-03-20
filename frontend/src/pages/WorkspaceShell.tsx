@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   WalletCards,
   BadgeDollarSign,
+  Blocks,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import type { ComponentType } from 'react'
@@ -38,6 +39,7 @@ const sectionIcons = {
   picks: BadgeDollarSign,
   live: Activity,
   'paper-trader': WalletCards,
+  combos: Blocks,
   research: FlaskConical,
   history: BarChart3,
 } satisfies Record<WorkspaceSection, ComponentType<{ size?: number; className?: string }>>

@@ -3,8 +3,13 @@ import type {
   AutoTradeConfig,
   AutoTradeStatus,
   BracketResponse,
+  ComboBoardResponse,
+  ComboCandidatesResponse,
+  ComboState,
+  GameDetailResponse,
   League,
   LivePayload,
+  ManualTradePreviewResponse,
   MatchupResponse,
   NcaabSummaryResponse,
   PaperTradeActionResult,
@@ -122,6 +127,12 @@ export async function getLive(league: League) {
   }
 }
 
+export async function getGameDetail(league: League, gameId: string) {
+  return league === 'nba'
+    ? fetchJson<GameDetailResponse>(`/api/live/game/${encodeURIComponent(gameId)}`)
+    : fetchJson<GameDetailResponse>(`/api/ncaab/live/game/${encodeURIComponent(gameId)}`)
+}
+
 export async function getMatchupTeams(league: League) {
   return league === 'nba'
     ? fetchJson<TeamListResponse>('/api/matchup/teams')
@@ -138,20 +149,14 @@ export async function getTeamExplorerTeams(league: League) {
   if (league === 'nba') {
     return fetchJson<TeamListResponse>('/api/team-explorer/teams')
   }
-  const teams = await fetchJson<TeamRowsResponse>('/api/ncaab/teams')
-  return {
-    teams: teams.teams
-      .map((team) => String(team.TeamName ?? team.team_name ?? ''))
-      .filter(Boolean)
-      .sort(),
-  } satisfies TeamListResponse
+  return fetchJson<TeamListResponse>('/api/ncaab/team-explorer/teams')
 }
 
 export async function getTeamExplorer(league: League, team: string) {
   if (league === 'nba') {
     return fetchJson<TeamExplorerResponse>(`/api/team-explorer/${team}`)
   }
-  return fetchJson<TeamRowsResponse>('/api/ncaab/teams')
+  return fetchJson<TeamExplorerResponse>(`/api/ncaab/team-explorer/${team}`)
 }
 
 export function getNcaabSummary() {
@@ -262,4 +267,104 @@ export function getModelUpdateStatus() {
   return fetchJson<{ status?: string; log?: string[]; started_at?: string; finished_at?: string }>(
     '/api/system/update-model/status',
   )
+}
+
+export async function deletePaperTrade(tradeId: string) {
+  const response = await fetch(withQuery(`/api/paper-trader/trade/${encodeURIComponent(tradeId)}`), {
+    method: 'DELETE',
+  })
+  if (!response.ok) throw new ApiError(`${response.status} ${response.statusText}`, response.status)
+  return (await response.json()) as { ok: boolean; trade_id: string }
+}
+
+export async function logCustomPaperTrade(
+  league: League,
+  homeTeam: string,
+  awayTeam: string,
+  selectedTeam: string,
+  customStake: number,
+  marketSource: string = 'kalshi'
+) {
+  const endpoint = league === 'nba' 
+    ? '/api/paper-trader/custom-trade'
+    : '/api/ncaab/paper-trader/custom-trade'
+  
+  return postJson<{ logged: number; message?: string; trade_id?: string }>(endpoint, {
+    home_team: homeTeam,
+    away_team: awayTeam,
+    selected_team: selectedTeam,
+    custom_stake: customStake,
+    market_source: marketSource,
+  })
+}
+
+export async function previewCustomPaperTrade(
+  league: League,
+  homeTeam: string,
+  awayTeam: string,
+  selectedTeam: string,
+  customStake: number,
+  marketSource: string = 'kalshi',
+) {
+  const endpoint = league === 'nba'
+    ? '/api/paper-trader/manual-preview'
+    : '/api/ncaab/paper-trader/manual-preview'
+
+  return postJson<ManualTradePreviewResponse>(endpoint, {
+    home_team: homeTeam,
+    away_team: awayTeam,
+    selected_team: selectedTeam,
+    custom_stake: customStake,
+    market_source: marketSource,
+  })
+}
+
+export function getComboState() {
+  return fetchJson<ComboState>('/api/combo-trader/state')
+}
+
+export function getComboBoard() {
+  return fetchJson<ComboBoardResponse>('/api/combo-trader/board')
+}
+
+export function getComboCollection(collectionTicker: string) {
+  return fetchJson<ComboBoardResponse['collections'][number]>(`/api/combo-trader/collection/${encodeURIComponent(collectionTicker)}`)
+}
+
+export function getComboCandidates() {
+  return fetchJson<ComboCandidatesResponse>('/api/combo-trader/candidates')
+}
+
+export function getComboPositions() {
+  return fetchJson<PaperPositionsResponse>('/api/combo-trader/positions')
+}
+
+export function previewComboTrade(
+  collectionTicker: string,
+  marketTickers: string[],
+  customStake: number,
+) {
+  return postJson<ManualTradePreviewResponse>('/api/combo-trader/manual-preview', {
+    collection_ticker: collectionTicker,
+    market_tickers: marketTickers,
+    custom_stake: customStake,
+  })
+}
+
+export function logComboTrade(
+  collectionTicker: string,
+  marketTickers: string[],
+  customStake: number,
+) {
+  return postJson<PaperTradeActionResult>('/api/combo-trader/custom-trade', {
+    collection_ticker: collectionTicker,
+    market_tickers: marketTickers,
+    custom_stake: customStake,
+  })
+}
+
+export function tradeComboCandidates(candidateIds: string[]) {
+  return postJson<PaperTradeActionResult>('/api/combo-trader/trades', {
+    candidate_ids: candidateIds,
+  })
 }

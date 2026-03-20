@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from src.ncaab_features import build_matchup_feature_row, parse_seed_number, slot_round_label
+from src.ncaab_features import build_matchup_feature_row, infer_seed_from_rank, parse_seed_number, slot_round_label
 from src.ncaab_bracket_viz import build_bracket_html
 from src.ncaab_live import best_name_match, normalize_team_name
 from src.ncaab_live import _infer_seed_from_rank
@@ -16,6 +16,28 @@ from src.ncaab_predict import (
     predict_matchup,
 )
 from src.ncaab_model import compute_season_sample_weights
+
+# Default new-feature values shared by all test fixtures.
+_NEW_FEATURE_DEFAULTS = {
+    "pace": 68.0,
+    "fg3_rate": 0.35,
+    "ft_pct": 0.72,
+    "ast_rate": 0.55,
+    "stl_rate": 0.04,
+    "blk_rate": 0.03,
+    "dreb_pct": 0.72,
+    "opp_tov_rate": 0.17,
+    "std_margin": 10.0,
+    "avg_opp_win_pct": 0.50,
+    "avg_opp_elo": 1500.0,
+}
+
+
+def _with_new_features(row: dict) -> dict:
+    """Merge default new-feature values into a test fixture row."""
+    merged = dict(_NEW_FEATURE_DEFAULTS)
+    merged.update(row)
+    return merged
 
 
 class NcaabPipelineTests(unittest.TestCase):
@@ -32,6 +54,12 @@ class NcaabPipelineTests(unittest.TestCase):
         self.assertEqual(parse_seed_number("W01"), 1)
         self.assertEqual(parse_seed_number("X16b"), 16)
 
+    def test_feature_seed_inference_caps_into_seed_lines(self) -> None:
+        self.assertEqual(infer_seed_from_rank(1), 1)
+        self.assertEqual(infer_seed_from_rank(8), 2)
+        self.assertEqual(infer_seed_from_rank(67), 16)
+        self.assertEqual(infer_seed_from_rank(None), 16)
+
     def test_infer_seed_from_rank_caps_into_seed_lines(self) -> None:
         self.assertEqual(_infer_seed_from_rank(1), 1)
         self.assertEqual(_infer_seed_from_rank(8), 2)
@@ -41,7 +69,7 @@ class NcaabPipelineTests(unittest.TestCase):
     def test_build_matchup_feature_row_builds_expected_diffs(self) -> None:
         team_features = pd.DataFrame(
             [
-                {
+                _with_new_features({
                     "Season": 2023,
                     "TeamID": 1,
                     "TeamName": "Alpha",
@@ -65,8 +93,8 @@ class NcaabPipelineTests(unittest.TestCase):
                     "last10_margin": 15.0,
                     "median_rank": 6.0,
                     "best_rank": 2.0,
-                },
-                {
+                }),
+                _with_new_features({
                     "Season": 2023,
                     "TeamID": 2,
                     "TeamName": "Beta",
@@ -90,7 +118,7 @@ class NcaabPipelineTests(unittest.TestCase):
                     "last10_margin": 4.0,
                     "median_rank": 24.0,
                     "best_rank": 15.0,
-                },
+                }),
             ]
         )
 
@@ -100,6 +128,9 @@ class NcaabPipelineTests(unittest.TestCase):
         self.assertEqual(row["team_b_name"], "Beta")
         self.assertEqual(row["seed_num_diff"], -7)
         self.assertEqual(row["elo_diff"], 100.0)
+        # New features should produce diffs of zero (same defaults).
+        self.assertAlmostEqual(row["pace_diff"], 0.0)
+        self.assertAlmostEqual(row["fg3_rate_diff"], 0.0)
 
     def test_slot_round_label_maps_known_rounds(self) -> None:
         self.assertEqual(slot_round_label("R1W1"), "Round of 64")
@@ -244,7 +275,7 @@ class NcaabPipelineTests(unittest.TestCase):
     def test_predict_matchup_rejects_same_team(self) -> None:
         team_features = pd.DataFrame(
             [
-                {
+                _with_new_features({
                     "Season": 2026,
                     "TeamID": 1,
                     "TeamName": "Duke",
@@ -268,7 +299,7 @@ class NcaabPipelineTests(unittest.TestCase):
                     "last10_margin": 16.0,
                     "median_rank": 2.0,
                     "best_rank": 1.0,
-                }
+                })
             ]
         )
 
@@ -278,7 +309,7 @@ class NcaabPipelineTests(unittest.TestCase):
     def test_predict_matchup_is_symmetric_when_teams_are_flipped(self) -> None:
         team_features = pd.DataFrame(
             [
-                {
+                _with_new_features({
                     "Season": 2026,
                     "TeamID": 1,
                     "TeamName": "Duke",
@@ -302,8 +333,8 @@ class NcaabPipelineTests(unittest.TestCase):
                     "last10_margin": 16.0,
                     "median_rank": 2.0,
                     "best_rank": 1.0,
-                },
-                {
+                }),
+                _with_new_features({
                     "Season": 2026,
                     "TeamID": 2,
                     "TeamName": "Michigan",
@@ -327,7 +358,7 @@ class NcaabPipelineTests(unittest.TestCase):
                     "last10_margin": 14.0,
                     "median_rank": 3.0,
                     "best_rank": 1.0,
-                },
+                }),
             ]
         )
         feature_cols = ["team_a_seed_num", "team_b_seed_num", "elo_diff"]

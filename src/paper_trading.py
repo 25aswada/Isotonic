@@ -255,6 +255,19 @@ def _build_polymarket_position(price: float, target_outlay: float, fee_rate: flo
     }
 
 
+def _build_position_for_target_outlay(
+    source: str,
+    price: float,
+    target_outlay: float,
+    fee_rate: float = 0.0,
+) -> dict | None:
+    if source == "kalshi":
+        return _build_kalshi_position(price, target_outlay)
+    if source == "polymarket":
+        return _build_polymarket_position(price, target_outlay, fee_rate)
+    return None
+
+
 def _size_position(
     source: str,
     price: float,
@@ -321,6 +334,48 @@ def _size_position(
     return position
 
 
+def _manual_position(
+    source: str,
+    price: float,
+    model_prob: float,
+    bankroll: float,
+    fallback_stake_pct: float,
+    fee_rate: float = 0.0,
+) -> dict | None:
+    if bankroll <= 0 or not (0 < price < 1) or not (0 < model_prob < 1):
+        return None
+
+    target_outlay = max(bankroll * fallback_stake_pct, price)
+    if source == "kalshi":
+        position = _build_kalshi_position(price, target_outlay)
+    elif source == "polymarket":
+        position = _build_polymarket_position(price, target_outlay, fee_rate)
+    else:
+        return None
+
+    if position is None or position["cash_outlay"] <= 0:
+        return None
+
+    net_decimal = position["payout_if_win"] / position["cash_outlay"]
+    if not np.isfinite(net_decimal) or net_decimal <= 1.0:
+        return None
+
+    break_even_prob = 1.0 / net_decimal
+    expected_value_per_dollar = (model_prob * net_decimal) - 1.0
+    kelly_pct = max(kelly_fraction(model_prob, net_decimal) * config.KELLY_FRACTION, 0.0)
+
+    position.update({
+        "entry_decimal": float(net_decimal),
+        "break_even_prob": float(break_even_prob),
+        "edge": float(model_prob - break_even_prob),
+        "kelly_pct": float(kelly_pct),
+        "expected_value_per_dollar": float(expected_value_per_dollar),
+        "expected_profit": float(expected_value_per_dollar * position["cash_outlay"]),
+        "stake": float(position["cash_outlay"]),
+    })
+    return position
+
+
 def load_paper_trades(log_path: str = config.PAPER_TRADES_CSV) -> pd.DataFrame:
     path = Path(log_path)
     if not path.exists():
@@ -333,6 +388,20 @@ def load_paper_trades(log_path: str = config.PAPER_TRADES_CSV) -> pd.DataFrame:
             df[col] = pd.to_datetime(df[col], errors="coerce", utc=("utc" in col or "snapshot" in col))
     return _annotate_trade_stage(df)
 
+
+
+
+def delete_paper_trade(trade_id: str, log_path: str = config.PAPER_TRADES_CSV) -> bool:
+    """Remove a trade from the paper trades CSV by trade_id."""
+    path = Path(log_path)
+    if not path.exists():
+        return False
+    df = pd.read_csv(path)
+    if "trade_id" not in df.columns or trade_id not in df["trade_id"].values:
+        return False
+    df = df[df["trade_id"] != trade_id]
+    df.to_csv(path, index=False)
+    return True
 
 def compute_paper_bankroll(
     trades_df: pd.DataFrame,
@@ -553,6 +622,216 @@ def compute_live_paper_bankroll(
     }
 
 
+def build_custom_paper_trade(
+    home_team: str,
+    away_team: str,
+    selected_team: str,
+    custom_stake: float,
+    market_source: str = "kalshi",
+    bankroll_snapshot: float | None = None,
+) -> dict | None:
+    """
+    Build a custom paper trade for any team in any game with a custom stake amount.
+    
+    Args:
+        home_team: Home team name
+        away_team: Away team name  
+        selected_team: Team to bet on (must be either home_team or away_team)
+        custom_stake: Custom stake amount in dollars
+        market_source: Market source ("kalshi" or "polymarket")
+        
+    Returns:
+        Trade dict or None if invalid
+    """
+    if selected_team not in [home_team, away_team]:
+        return None
+    if custom_stake <= 0:
+        return None
+        
+    bet_side = "home" if selected_team == home_team else "away"
+    
+    # Get current market odds
+    try:
+        from src.odds_collection import get_all_market_odds
+        odds_df = get_all_market_odds(record_snapshot=False)
+        features = pd.DataFrame()
+        feature_game_id = None
+        feature_game_date = pd.NaT
+        feature_tipoff_utc = None
+        
+        # Find matching game (try both full names and abbreviations)
+        game_mask = (
+            ((odds_df["home_team"] == home_team) & (odds_df["away_team"] == away_team)) |
+            ((odds_df["home_team"] == away_team) & (odds_df["away_team"] == home_team))
+        )
+        matching_games = odds_df[game_mask]
+        
+        # If no match with exact names, try to find games where teams match regardless of order
+        if matching_games.empty:
+            # Try to find by checking if both teams appear in game (regardless of home/away)
+            for _, game in odds_df.iterrows():
+                game_teams = {game["home_team"], game["away_team"]}
+                if {home_team, away_team} == game_teams:
+                    matching_games = pd.DataFrame([game])
+                    break
+        
+        if matching_games.empty:
+            return None
+            
+        game = matching_games.iloc[0]
+
+        try:
+            from scripts.daily_predictions import get_todays_features
+
+            features = get_todays_features()
+            if not features.empty:
+                feature_match = features[
+                    (features["home_team"].astype(str) == str(home_team))
+                    & (features["away_team"].astype(str) == str(away_team))
+                ]
+                if feature_match.empty:
+                    feature_match = features[
+                        (features["home_team"].astype(str) == str(away_team))
+                        & (features["away_team"].astype(str) == str(home_team))
+                    ]
+                if not feature_match.empty:
+                    feature_row = feature_match.iloc[0]
+                    feature_game_id = feature_row.get("game_id")
+                    feature_game_date = pd.to_datetime(feature_row.get("game_date"), errors="coerce")
+                    feature_tipoff_utc = feature_row.get("tipoff_utc")
+        except Exception:
+            pass
+        
+        # Determine if teams are flipped
+        teams_flipped = game["home_team"] == away_team
+        
+        # Get the correct price column
+        price_col = MARKET_EXECUTION_PRICE_COLS[market_source][bet_side]
+        if teams_flipped:
+            # If teams are flipped, we need to flip the side too
+            actual_side = "away" if bet_side == "home" else "home"
+            price_col = MARKET_EXECUTION_PRICE_COLS[market_source][actual_side]
+            
+        entry_price = _safe_float(game.get(price_col))
+        if not (0 < entry_price < 1):
+            return None
+            
+        # Get actual model probability for this matchup from today's prediction pipeline.
+        model_prob = np.nan
+        try:
+            from src.predict import predict_batch
+            from src.injuries import apply_live_availability_adjustments
+
+            if not features.empty:
+                predictions = predict_batch(features)
+                predictions = apply_live_availability_adjustments(predictions)
+                pred_match = predictions[
+                    (predictions["home_team"].astype(str) == str(home_team))
+                    & (predictions["away_team"].astype(str) == str(away_team))
+                ]
+                if pred_match.empty:
+                    pred_match = predictions[
+                        (predictions["home_team"].astype(str) == str(away_team))
+                        & (predictions["away_team"].astype(str) == str(home_team))
+                    ]
+                if not pred_match.empty:
+                    pred_row = pred_match.iloc[0]
+                    if str(pred_row.get("home_team")) == str(home_team):
+                        model_prob = _safe_float(
+                            pred_row.get("home_win_prob") if selected_team == home_team else pred_row.get("away_win_prob")
+                        )
+                    else:
+                        model_prob = _safe_float(
+                            pred_row.get("away_win_prob") if selected_team == home_team else pred_row.get("home_win_prob")
+                        )
+        except Exception:
+            model_prob = np.nan
+
+        if pd.isna(model_prob) or not (0 < model_prob < 1):
+            # Fallback to market probability only if model data is unavailable.
+            if teams_flipped:
+                model_prob_col = "kalshi_away_prob" if selected_team == away_team else "kalshi_home_prob"
+            else:
+                model_prob_col = "kalshi_home_prob" if selected_team == home_team else "kalshi_away_prob"
+            model_prob = _safe_float(game.get(model_prob_col))
+        if pd.isna(model_prob) or not (0 < model_prob < 1):
+            return None
+            
+        # Get reference probability
+        ref_col = MARKET_REFERENCE_COLS[market_source]
+        ref_home_prob = _safe_float(game.get(ref_col))
+        if pd.notna(ref_home_prob):
+            if teams_flipped:
+                market_prob = ref_home_prob if selected_team == away_team else 1.0 - ref_home_prob
+            else:
+                market_prob = ref_home_prob if selected_team == home_team else 1.0 - ref_home_prob
+        else:
+            market_prob = entry_price
+            
+        fee_rate = 0.0
+        if market_source in MARKET_FEE_RATE_COLS:
+            fee_col = MARKET_FEE_RATE_COLS[market_source][bet_side]
+            fee_rate = max(_safe_float(game.get(fee_col), default=0.0), 0.0)
+
+        position = _build_position_for_target_outlay(
+            source=market_source,
+            price=entry_price,
+            target_outlay=custom_stake,
+            fee_rate=fee_rate,
+        )
+        if position is None:
+            return None
+
+        stake = float(position["cash_outlay"])
+        net_decimal = position["payout_if_win"] / stake
+        break_even_prob = 1.0 / net_decimal
+        expected_value_per_dollar = (model_prob * net_decimal) - 1.0
+        position.update({
+            "entry_decimal": float(net_decimal),
+            "break_even_prob": float(break_even_prob),
+            "edge": float(model_prob - break_even_prob),
+            "kelly_pct": float(max(kelly_fraction(model_prob, net_decimal) * config.KELLY_FRACTION, 0.0)),
+            "expected_value_per_dollar": float(expected_value_per_dollar),
+            "expected_profit": float(expected_value_per_dollar * stake),
+            "stake": float(stake),
+        })
+        
+        # Build trade record
+        game_date = feature_game_date
+        if pd.isna(game_date):
+            game_date = pd.to_datetime(game.get("game_date"), errors="coerce")
+        game_id = feature_game_id
+        if pd.isna(game_id) or game_id in (None, ""):
+            game_id = game.get("game_id", f"{away_team}@{home_team}_{game_date.date() if pd.notna(game_date) else 'unknown'}")
+        trade_id = f"custom_{game_date.date().isoformat() if pd.notna(game_date) else pd.Timestamp.now().date().isoformat()}_{game_id}_{market_source}_{bet_side}"
+        bankroll_value = float(bankroll_snapshot if bankroll_snapshot is not None else custom_stake)
+        
+        return {
+            "trade_id": trade_id,
+            "placed_at": pd.Timestamp.now(),
+            "game_id": game_id,
+            "game_date": game_date,
+            "tipoff_utc": feature_tipoff_utc or game.get("tipoff_utc"),
+            "market_source": market_source,
+            "home_team": home_team,
+            "away_team": away_team,
+            "bet_side": bet_side,
+            "contract_team": selected_team,
+            "model_prob": float(model_prob),
+            "market_prob": float(market_prob),
+            "quoted_entry_price": float(entry_price),
+            "entry_price": float(entry_price),
+            "entry_slippage": 0.0,
+            "status": "open",
+            "bankroll_snapshot": bankroll_value,
+            "cash_after_trade": _round_money(max(bankroll_value - stake, 0.0)),
+            **position,
+        }
+        
+    except Exception:
+        return None
+
+
 def build_paper_trade_candidates(
     recommendations_df: pd.DataFrame,
     bankroll: float,
@@ -644,8 +923,6 @@ def build_paper_trade_candidates(
                 continue
 
             best_side = max(side_options, key=lambda row: row["raw_edge"])
-            if best_side["raw_edge"] <= 0:
-                continue
             raw_candidates.append(best_side)
 
     if not raw_candidates:
@@ -666,8 +943,17 @@ def build_paper_trade_candidates(
             fee_rate=candidate["fee_rate"],
         )
         if position is None:
+            position = _manual_position(
+                source=candidate["market_source"],
+                price=candidate["entry_price"],
+                model_prob=candidate["model_prob"],
+                bankroll=remaining_cash,
+                fallback_stake_pct=config.MIN_KELLY_BET,
+                fee_rate=candidate["fee_rate"],
+            )
+        if position is None:
             continue
-        if position["edge"] < edge_threshold or position["stake"] <= 0:
+        if position["stake"] <= 0:
             continue
 
         trade_day = (

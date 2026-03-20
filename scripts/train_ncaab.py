@@ -17,7 +17,7 @@ import pandas as pd
 
 import ncaab_config
 from src.evaluate import compute_metrics, compute_shap_values, plot_calibration, plot_feature_importance
-from src.ncaab_model import load_model, prepare_xy, run_training_pipeline, save_metrics
+from src.ncaab_model import load_model, prepare_xy, run_training_pipeline, save_metrics, walkforward_cv
 from src.runtime import setup_project_logging
 
 logger = setup_project_logging(__name__, "train_ncaab.log")
@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train March Madness NCAA model")
     parser.add_argument("--tune", action="store_true", help="Run Optuna hyperparameter tuning")
     parser.add_argument("--n-trials", type=int, default=50, help="Number of Optuna trials")
+    parser.add_argument("--skip-walkforward", action="store_true", help="Skip walk-forward CV")
     return parser.parse_args()
 
 
@@ -36,11 +37,16 @@ def main() -> None:
     logger.info("March Madness Model Trainer")
     logger.info("=" * 60)
 
-    if not ncaab_config.NCAAB_MODEL_READY_CSV.exists():
-        logger.error("Dataset missing at %s. Run scripts/build_ncaab_dataset.py first.", ncaab_config.NCAAB_MODEL_READY_CSV)
+    dataset_path = (
+        ncaab_config.NCAAB_MODEL_READY_AUGMENTED_CSV
+        if ncaab_config.NCAAB_MODEL_READY_AUGMENTED_CSV.exists()
+        else ncaab_config.NCAAB_MODEL_READY_CSV
+    )
+    if not dataset_path.exists():
+        logger.error("Dataset missing at %s. Run scripts/build_ncaab_dataset.py first.", dataset_path)
         sys.exit(1)
 
-    df = pd.read_csv(ncaab_config.NCAAB_MODEL_READY_CSV)
+    df = pd.read_csv(dataset_path)
     model, feature_cols, test_df, test_probs = run_training_pipeline(
         df,
         tune=args.tune,
@@ -65,6 +71,10 @@ def main() -> None:
             "val_seasons": ncaab_config.VAL_SEASONS,
             "test_seasons": ncaab_config.TEST_SEASONS,
             "n_features": len(feature_cols),
+            "dataset_path": str(dataset_path),
+            "train_rows": int(len(df[df["Season"].isin(ncaab_config.TRAIN_SEASONS)])),
+            "val_rows": int(len(df[df["Season"].isin(ncaab_config.VAL_SEASONS)])),
+            "test_rows": int(len(test_df)),
             "model_type": model_type,
             "xgb_weight": xgb_weight,
             "linear_weight": linear_weight,
@@ -73,6 +83,19 @@ def main() -> None:
             "n_trials": int(args.n_trials),
         }
     )
+    # ── Walk-forward cross-validation ──
+    if not args.skip_walkforward:
+        logger.info("\n" + "=" * 60)
+        logger.info("Walk-Forward Cross-Validation")
+        logger.info("=" * 60)
+        wf_results = walkforward_cv(df)
+        if wf_results:
+            import numpy as _np
+            metrics["walkforward"] = wf_results
+            metrics["walkforward_mean_accuracy"] = float(_np.mean([r["accuracy"] for r in wf_results]))
+            metrics["walkforward_mean_logloss"] = float(_np.mean([r["log_loss"] for r in wf_results]))
+            metrics["walkforward_years"] = len(wf_results)
+
     save_metrics(metrics)
 
     ncaab_config.NCAAB_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -95,7 +118,12 @@ def main() -> None:
         from src.ncaab_data import load_raw_csv
         from src.score_model import train_ncaa_score_model
         reg_season = load_raw_csv("MRegularSeasonDetailedResults.csv")
-        team_feats = pd.read_csv(ncaab_config.NCAAB_TEAM_FEATURES_CSV)
+        score_feature_path = (
+            ncaab_config.NCAAB_ALL_TEAM_FEATURES_CSV
+            if ncaab_config.NCAAB_ALL_TEAM_FEATURES_CSV.exists()
+            else ncaab_config.NCAAB_TEAM_FEATURES_CSV
+        )
+        team_feats = pd.read_csv(score_feature_path)
         score_metrics = train_ncaa_score_model(
             reg_season, team_feats,
             train_seasons=ncaab_config.TRAIN_SEASONS,

@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams } from 'react-router-dom'
 
@@ -9,8 +10,11 @@ import {
   getPaperPositions,
   getPaperState,
   logPaperTrades,
+  previewCustomPaperTrade,
   tradePaperCandidates,
   updateAutoTrade,
+  deletePaperTrade,
+  logCustomPaperTrade,
 } from '../lib/api'
 import { formatAgeSeconds, formatDateTime, money, moneySigned, pct, pct0, titleCase } from '../lib/format'
 import { isLeague, leagueLabels, normalizeLeague } from '../lib/navigation'
@@ -79,6 +83,249 @@ function autoTradeSummary(status: AutoTradeStatus) {
   if (!status.enabled) return 'Auto trade is paused. Manual paper trading is still available.'
   if (status.mode === 'dry-run') return 'Dry-run mode is active. Cycles simulate trades without logging them.'
   return 'Auto trade is armed. Eligible early lines will be paper-traded automatically during active hours.'
+}
+
+function ManualTradePanel({ league, bankroll }: { league: League; bankroll: PaperBankroll }) {
+  const [homeTeam, setHomeTeam] = useState('')
+  const [awayTeam, setAwayTeam] = useState('')
+  const [selectedTeam, setSelectedTeam] = useState('')
+  const [customStake, setCustomStake] = useState(50)
+  const [marketSource, setMarketSource] = useState('kalshi')
+  
+  const queryClient = useQueryClient()
+  
+  // Get available games for manual betting
+  const { data: liveData } = useQuery({
+    queryKey: ['live', league],
+    queryFn: () => {
+      if (league === 'nba') {
+        return fetch('/api/live').then(r => r.json())
+      } else {
+        return fetch('/api/ncaab/live').then(r => r.json())
+      }
+    },
+  })
+  
+  const availableGames = useMemo(() => {
+    const games = [...(liveData?.in_progress ?? []), ...(liveData?.upcoming ?? [])]
+    return games.map((game: any) => ({
+      id: String(game.game_id ?? `${game.away_team}@${game.home_team}`),
+      homeTeam: game.home_team,
+      awayTeam: game.away_team,
+      tipoffUtc: game.tipoff_utc,
+      statusText: game.game_status_text,
+      homeMarket: game.kalshi_home_prob,
+      awayMarket: game.kalshi_away_prob,
+    }))
+  }, [liveData])
+
+  const manualPreview = useQuery({
+    queryKey: ['manual-paper-preview', league, homeTeam, awayTeam, selectedTeam, customStake, marketSource],
+    queryFn: () => previewCustomPaperTrade(league, homeTeam, awayTeam, selectedTeam, customStake, marketSource),
+    enabled: Boolean(homeTeam && awayTeam && selectedTeam && customStake > 0),
+    refetchInterval: selectedTeam ? 15_000 : false,
+  })
+  
+  const customTradeMutation = useMutation({
+    mutationFn: () => logCustomPaperTrade(league, homeTeam, awayTeam, selectedTeam, customStake, marketSource),
+    onSuccess: () => {
+      // Invalidate queries to refresh data
+      void queryClient.invalidateQueries({ queryKey: ['paper-state', league] })
+      void queryClient.invalidateQueries({ queryKey: ['paper-positions', league] })
+      void queryClient.invalidateQueries({ queryKey: ['paper-candidates', league] })
+      void queryClient.invalidateQueries({ queryKey: ['manual-paper-preview', league] })
+      
+      setSelectedTeam('')
+    },
+  })
+
+  const previewTrade = manualPreview.data?.trade
+
+  return (
+    <Surface className="stack-panel">
+      <div className="stack-panel__header">
+        <div>
+          <span className="section-kicker">Manual trade</span>
+          <h3>Trade any game</h3>
+        </div>
+        <Pill tone="accent">{money(bankroll.available_cash)} free</Pill>
+      </div>
+
+      <div className="paper-manual">
+        <div className="paper-manual__board">
+          {availableGames.map((game: any) => {
+            const isSelected = game.homeTeam === homeTeam && game.awayTeam === awayTeam
+            return (
+              <button
+                key={game.id}
+                className={`paper-manual__game ${isSelected ? 'is-selected' : ''}`}
+                onClick={() => {
+                  setHomeTeam(game.homeTeam)
+                  setAwayTeam(game.awayTeam)
+                  setSelectedTeam('')
+                }}
+              >
+                <div className="paper-manual__teams">
+                  <div className="preview-row__team">
+                    <TeamLogo team={game.awayTeam as string} size={16} />
+                    <span>{game.awayTeam}</span>
+                  </div>
+                  <span>@</span>
+                  <div className="preview-row__team">
+                    <TeamLogo team={game.homeTeam as string} size={16} />
+                    <span>{game.homeTeam}</span>
+                  </div>
+                </div>
+                <small>{game.tipoffUtc ? formatDateTime(game.tipoffUtc) : game.statusText || 'Today'}</small>
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="paper-manual__ticket">
+          <div className="paper-manual__controls">
+            <div>
+              <label>Side</label>
+              <div className="paper-manual__side-picks">
+                <button
+                  className={selectedTeam && selectedTeam === awayTeam ? 'is-selected' : ''}
+                  disabled={!awayTeam}
+                  onClick={() => setSelectedTeam(awayTeam)}
+                >
+                  {awayTeam || 'Away'}
+                </button>
+                <button
+                  className={selectedTeam && selectedTeam === homeTeam ? 'is-selected' : ''}
+                  disabled={!homeTeam}
+                  onClick={() => setSelectedTeam(homeTeam)}
+                >
+                  {homeTeam || 'Home'}
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label>Market</label>
+              <select value={marketSource} onChange={(e) => setMarketSource(e.target.value)}>
+                <option value="kalshi">Kalshi</option>
+                {league === 'nba' ? <option value="polymarket">Polymarket</option> : null}
+              </select>
+            </div>
+
+            <div>
+              <label>Dollar amount</label>
+              <div className="paper-manual__money-input">
+                <span>$</span>
+                <input
+                  type="number"
+                  min="1"
+                  max={Math.max(1, Math.floor(bankroll.available_cash ?? 0))}
+                  step="1"
+                  value={customStake}
+                  onChange={(e) => setCustomStake(Number(e.target.value))}
+                />
+              </div>
+            </div>
+          </div>
+
+          {previewTrade ? (
+            <div className="trade-ticket">
+              <div className="trade-ticket__header">
+                <div className="trade-ticket__outcome">
+                  <span className="trade-ticket__label">Outcome</span>
+                  <div className="trade-ticket__team-row">
+                    <TeamLogo team={previewTrade.contract_team as string} size={22} />
+                    <strong>{previewTrade.contract_team} wins</strong>
+                  </div>
+                </div>
+                <Pill tone="accent">{titleCase(previewTrade.market_source)}</Pill>
+              </div>
+
+              <div className="trade-ticket__price-hero">
+                <div className="trade-ticket__price-block trade-ticket__price-block--price">
+                  <span>Price</span>
+                  <strong>{Math.round(Number(previewTrade.entry_price ?? 0) * 100)}¢</strong>
+                </div>
+                <div className="trade-ticket__price-block trade-ticket__price-block--contracts">
+                  <span>Contracts</span>
+                  <strong>{String(previewTrade.contracts ?? previewTrade.net_shares ?? '—')}</strong>
+                </div>
+              </div>
+
+              <div className="trade-ticket__summary">
+                <div className="trade-ticket__row">
+                  <span>You pay</span>
+                  <strong className="trade-ticket__outlay">{money(previewTrade.stake)}</strong>
+                </div>
+                <div className="trade-ticket__row">
+                  <span>Fees</span>
+                  <strong className="trade-ticket__fee">{money(Number(previewTrade.entry_fee ?? 0))}</strong>
+                </div>
+                <div className="trade-ticket__row trade-ticket__row--total">
+                  <span>Total cost</span>
+                  <strong className="trade-ticket__total">{money(Number(previewTrade.stake ?? 0) + Number(previewTrade.entry_fee ?? 0))}</strong>
+                </div>
+              </div>
+
+              <div className="trade-ticket__payout">
+                <div className="trade-ticket__payout-row">
+                  <span>Payout if win</span>
+                  <strong className="trade-ticket__win">{money(Number(previewTrade.payout_if_win ?? 0))}</strong>
+                </div>
+                <div className="trade-ticket__payout-row">
+                  <span>Profit if win</span>
+                  <strong className="trade-ticket__win">
+                    +{money(Number(previewTrade.payout_if_win ?? 0) - Number(previewTrade.stake ?? 0) - Number(previewTrade.entry_fee ?? 0))}
+                  </strong>
+                </div>
+                <div className="trade-ticket__payout-row trade-ticket__payout-row--dim">
+                  <span>Loss if wrong</span>
+                  <strong className="trade-ticket__loss">-{money(Number(previewTrade.stake ?? 0) + Number(previewTrade.entry_fee ?? 0))}</strong>
+                </div>
+              </div>
+
+              <div className="trade-ticket__probabilities">
+                <div className="trade-ticket__prob">
+                  <span>Model</span>
+                  <strong className={Number(previewTrade.model_prob ?? 0) > Number(previewTrade.market_prob ?? 0) ? 'trade-ticket__edge' : ''}>{pct0(previewTrade.model_prob)}</strong>
+                </div>
+                <div className="trade-ticket__prob">
+                  <span>Market</span>
+                  <strong className="trade-ticket__market">{pct0(previewTrade.market_prob)}</strong>
+                </div>
+                <div className="trade-ticket__prob">
+                  <span>Break even</span>
+                  <strong className="trade-ticket__breakeven">{pct0(previewTrade.break_even_prob)}</strong>
+                </div>
+                <div className="trade-ticket__prob">
+                  <span>Cash after</span>
+                  <strong className="trade-ticket__cash-after">{money(previewTrade.cash_after_trade)}</strong>
+                </div>
+              </div>
+
+              <Button
+                disabled={customTradeMutation.isPending || !selectedTeam}
+                onClick={() => customTradeMutation.mutate()}
+              >
+                {customTradeMutation.isPending ? 'Placing…' : `Buy ${previewTrade.contract_team} — ${money(previewTrade.stake)}`}
+              </Button>
+            </div>
+          ) : (
+            <div className="paper-manual__empty">
+              <strong>{manualPreview.isFetching ? 'Pricing trade…' : 'Build a ticket'}</strong>
+              <p>Select a game, choose a side, and enter a dollar amount to preview the trade like a normal Kalshi ticket.</p>
+            </div>
+          )}
+
+          {customTradeMutation.error ? (
+            <div className="paper-error-message">
+              Error: {customTradeMutation.error instanceof Error ? customTradeMutation.error.message : 'Unknown error'}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </Surface>
+  )
 }
 
 function PortfolioHero({
@@ -254,7 +501,7 @@ function CandidateCard({
   )
 }
 
-function OpenPositionsPanel({ items }: { items: PositionRecord[] }) {
+function OpenPositionsPanel({ items, onDelete }: { items: PositionRecord[]; onDelete?: (tradeId: string) => void }) {
   return (
     <Surface className="stack-panel">
       <div className="stack-panel__header">
@@ -301,6 +548,14 @@ function OpenPositionsPanel({ items }: { items: PositionRecord[] }) {
                     <strong className={valueClass('info')}>{pct0(item.entry_price)}</strong>
                   </div>
                   <div>
+                    <span>Kalshi</span>
+                    <strong className={valueClass(
+                      item.current_mark_price != null && item.entry_price != null
+                        ? Number(item.current_mark_price) >= Number(item.entry_price) ? 'good' : 'bad'
+                        : 'info'
+                    )}>{pct0(item.current_mark_price ?? item.entry_price)}</strong>
+                  </div>
+                  <div>
                     <span>Current</span>
                     <strong className={valueClass(currentTone)}>{money(currentValue)}</strong>
                   </div>
@@ -309,12 +564,27 @@ function OpenPositionsPanel({ items }: { items: PositionRecord[] }) {
                     <strong className={valueClass('info')}>{money(item.stake)}</strong>
                   </div>
                   <div>
+                    <span>Fees</span>
+                    <strong className={valueClass('bad')}>
+                      {money((Number(item.entry_fee ?? 0)) + (Number(item.current_exit_fee ?? 0)))}
+                    </strong>
+                  </div>
+                  <div>
                     <span>P/L</span>
                     <strong className={livePnl == null ? '' : livePnl >= 0 ? 'is-good' : 'is-bad'}>
                       {moneySigned(livePnl)}
                     </strong>
                   </div>
                 </div>
+                {onDelete && item.trade_id && (
+                  <button
+                    className="icon-button icon-button--danger position-row__delete"
+                    title="Remove trade"
+                    onClick={() => onDelete(String(item.trade_id))}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                )}
               </div>
             )
           })}
@@ -517,6 +787,7 @@ export default function PaperTraderPage() {
   const [autoStatusMessage, setAutoStatusMessage] = useState('')
   const [busyCandidateId, setBusyCandidateId] = useState<string | null>(null)
   const [busyAutoAction, setBusyAutoAction] = useState<AutoTradeConfig['action'] | null>(null)
+  const [dismissedCandidateIds, setDismissedCandidateIds] = useState<string[]>([])
 
   const paperState = useQuery({
     queryKey: ['paper-state', league],
@@ -547,6 +818,9 @@ export default function PaperTraderPage() {
     mutationFn: (candidateIds: string[]) => tradePaperCandidates(league, candidateIds),
     onSuccess: (data) => {
       setStatusMessage(data.message ?? `Logged ${data.logged ?? 0} trade${data.logged === 1 ? '' : 's'}.`)
+      if (busyCandidateId) {
+        setDismissedCandidateIds((current) => Array.from(new Set([...current, busyCandidateId])))
+      }
       invalidatePaperQueries()
     },
     onError: () => {
@@ -561,6 +835,7 @@ export default function PaperTraderPage() {
     mutationFn: () => logPaperTrades(league),
     onSuccess: (data) => {
       setStatusMessage(data.message ?? `Logged ${data.logged ?? 0} trades.`)
+      setDismissedCandidateIds((current) => Array.from(new Set([...current, ...candidates.map((candidate) => candidate.candidate_id)])))
       invalidatePaperQueries()
     },
     onError: () => {
@@ -582,9 +857,44 @@ export default function PaperTraderPage() {
     },
   })
 
-  const candidates = useMemo(() => paperCandidates.data?.candidates ?? [], [paperCandidates.data?.candidates])
+  const rawCandidates = useMemo(() => paperCandidates.data?.candidates ?? [], [paperCandidates.data?.candidates])
   const openPositions = useMemo(() => paperPositions.data?.open ?? [], [paperPositions.data?.open])
   const settledPositions = useMemo(() => paperPositions.data?.settled ?? [], [paperPositions.data?.settled])
+
+  useEffect(() => {
+    const activeCandidateIds = new Set(rawCandidates.map((candidate) => candidate.candidate_id))
+    setDismissedCandidateIds((current) => current.filter((candidateId) => activeCandidateIds.has(candidateId)))
+  }, [rawCandidates])
+
+  const existingTradeIds = useMemo(
+    () =>
+      new Set(
+        [...openPositions, ...settledPositions]
+          .map((item) => String(item.trade_id ?? ''))
+          .filter(Boolean),
+      ),
+    [openPositions, settledPositions],
+  )
+
+  const candidates = useMemo(
+    () =>
+      rawCandidates.filter(
+        (candidate) =>
+          !dismissedCandidateIds.includes(candidate.candidate_id)
+          && !existingTradeIds.has(String(candidate.trade_id ?? '')),
+      ),
+    [dismissedCandidateIds, existingTradeIds, rawCandidates],
+  )
+
+  const deleteTradeM = useMutation({
+    mutationFn: deletePaperTrade,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['paper-positions'] })
+      queryClient.invalidateQueries({ queryKey: ['paper-state'] })
+      queryClient.invalidateQueries({ queryKey: ['paper-candidates', league] })
+    },
+  })
+  const handleDeleteTrade = (tradeId: string) => deleteTradeM.mutate(tradeId)
 
   if (paperState.isLoading || paperCandidates.isLoading || paperPositions.isLoading) {
     return <Surface className="loading-panel"><div><strong>Assembling Paper Trader</strong><p>Loading the portfolio, trade queue, and live ledger.</p></div></Surface>
@@ -640,6 +950,8 @@ export default function PaperTraderPage() {
 
       <div className="paper-layout">
         <div className="paper-layout__main">
+          <ManualTradePanel league={league} bankroll={bankroll} />
+          
           <Surface className="stack-panel">
             <div className="stack-panel__header">
               <div>
@@ -688,7 +1000,7 @@ export default function PaperTraderPage() {
             )}
           </Surface>
 
-          <OpenPositionsPanel items={openPositions} />
+          <OpenPositionsPanel items={openPositions} onDelete={handleDeleteTrade} />
           <SettledPositionsPanel items={settledPositions} />
         </div>
 
