@@ -207,6 +207,7 @@ export interface ComboLegRecord {
   title?: string
   display?: string
   market_type?: string
+  player?: string | null
   team?: string | null
   team_side?: string | null
   threshold?: number | null
