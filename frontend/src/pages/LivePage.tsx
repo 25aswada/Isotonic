@@ -178,7 +178,7 @@ function LiveCard({
 
       <div className="live-card-modern__scoreboard">
         <div className="live-team">
-          <TeamLogo team={game.away_team as string} size={36} />
+          <TeamLogo team={(game.away_full_name ?? game.away_team) as string} size={36} />
           <span style={{ color: teamAccent((game.away_full_name ?? game.away_team) as string) }}>{game.away_team}</span>
           <strong>
             <AnimatedScoreValue
@@ -205,7 +205,7 @@ function LiveCard({
           </strong>
         </div>
         <div className="live-team live-team--right">
-          <TeamLogo team={game.home_team as string} size={36} />
+          <TeamLogo team={(game.home_full_name ?? game.home_team) as string} size={36} />
           <span style={{ color: teamAccent((game.home_full_name ?? game.home_team) as string) }}>{game.home_team}</span>
           <strong>
             <AnimatedScoreValue

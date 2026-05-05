@@ -2273,10 +2273,69 @@ async def ncaab_bracket():
     def _run():
         import ncaab_config as nc
         if not nc.NCAAB_CURRENT_PROJECTED_BRACKET_CSV.exists(): return {"bracket":[],"available":False}
+
+        def _recent_completed_results() -> list[dict[str, Any]]:
+            import requests
+
+            url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
+            today_et = pd.Timestamp.now(tz="America/New_York").normalize()
+            results: list[dict[str, Any]] = []
+
+            for days_back in range(4):
+                date_value = (today_et - pd.Timedelta(days=days_back)).strftime("%Y%m%d")
+                try:
+                    response = requests.get(
+                        url,
+                        params={"groups": 50, "limit": 200, "dates": date_value},
+                        timeout=20,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                except Exception:
+                    continue
+
+                for event in payload.get("events", []) or []:
+                    competition = (event.get("competitions") or [{}])[0]
+                    status_type = ((competition.get("status") or {}).get("type") or {})
+                    if not status_type.get("completed"):
+                        continue
+
+                    competitors = competition.get("competitors") or []
+                    if len(competitors) < 2:
+                        continue
+
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[0])
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[1])
+                    home_team = ((home.get("team") or {}).get("displayName") or "").strip()
+                    away_team = ((away.get("team") or {}).get("displayName") or "").strip()
+                    if not home_team or not away_team:
+                        continue
+
+                    try:
+                        home_score = int(str(home.get("score") or "0"))
+                        away_score = int(str(away.get("score") or "0"))
+                    except Exception:
+                        home_score = 0
+                        away_score = 0
+
+                    winner = home_team if home_score > away_score else away_team
+                    results.append({
+                        "date": date_value,
+                        "home_team": home_team,
+                        "away_team": away_team,
+                        "home_score": home_score,
+                        "away_score": away_score,
+                        "winner_name": winner,
+                    })
+
+            return results
+
         result: dict = {"bracket":_df_to_records(pd.read_csv(nc.NCAAB_CURRENT_PROJECTED_BRACKET_CSV)),"available":True}
         adv_path = nc.NCAAB_PROCESSED_DIR / "advancement_probabilities.csv"
         if adv_path.exists():
             result["advancement"] = _df_to_records(pd.read_csv(adv_path))
+        result["results"] = _recent_completed_results()
         return result
     return _ok(await asyncio.get_event_loop().run_in_executor(None, _run))
 

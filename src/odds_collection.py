@@ -605,12 +605,13 @@ def get_sportsbook_odds() -> pd.DataFrame:
 
 def get_all_market_odds(record_snapshot: bool = True, snapshot_context: str = "live") -> pd.DataFrame:
     """
-    Fetch prices from Kalshi and return them in a single DataFrame keyed by
+    Fetch prices from Kalshi (and sportsbooks as fallback) keyed by
     (home_team, away_team).
 
     Returns one row per game with per-source fields prefixed by source name.
     """
     kalshi = get_kalshi_odds()
+    sportsbook = get_sportsbook_odds()
 
     def _prefix_source(df: pd.DataFrame, source: str) -> pd.DataFrame:
         if df.empty:
@@ -625,6 +626,7 @@ def get_all_market_odds(record_snapshot: bool = True, snapshot_context: str = "l
 
     frames = [
         _prefix_source(kalshi, "kalshi"),
+        _prefix_source(sportsbook, "sportsbook"),
     ]
     frames = [f for f in frames if not f.empty]
     if not frames:
@@ -633,6 +635,15 @@ def get_all_market_odds(record_snapshot: bool = True, snapshot_context: str = "l
     df = frames[0]
     for frame in frames[1:]:
         df = df.merge(frame, on=["home_team", "away_team"], how="outer")
+
+    # Fill missing Kalshi probs from sportsbook when Kalshi has no market
+    for side in ("home", "away"):
+        kalshi_col = f"kalshi_{side}_prob"
+        sb_col = f"sportsbook_{side}_prob"
+        if kalshi_col in df.columns and sb_col in df.columns:
+            df[kalshi_col] = df[kalshi_col].fillna(df[sb_col])
+        elif sb_col in df.columns and kalshi_col not in df.columns:
+            df[kalshi_col] = df[sb_col]
 
     reference_cols = [
         col for col in [

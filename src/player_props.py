@@ -22,7 +22,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAYER_LOG_GLOB = str(ROOT / "data" / "raw" / "player_logs_*.csv")
-SUPPORTED_PROP_STATS = {"points": "PTS", "rebounds": "REB", "assists": "AST", "steals": "STL", "blocks": "BLK"}
+SUPPORTED_PROP_STATS = {"points": "PTS", "rebounds": "REB", "assists": "AST", "steals": "STL", "blocks": "BLK", "threes": "FG3M"}
 def _ascii_fold(value: str) -> str:
     text = unicodedata.normalize("NFKD", value or "")
     return "".join(char for char in text if not unicodedata.combining(char))
@@ -107,6 +107,7 @@ def _load_player_logs() -> pd.DataFrame:
                 "AST",
                 "STL",
                 "BLK",
+                "FG3M",
             ],
         )
         frame["season"] = season
@@ -117,7 +118,7 @@ def _load_player_logs() -> pd.DataFrame:
 
     logs = pd.concat(frames, ignore_index=True)
     logs["GAME_DATE"] = pd.to_datetime(logs["GAME_DATE"], errors="coerce")
-    for column in ["MIN", "PTS", "REB", "AST", "STL", "BLK"]:
+    for column in ["MIN", "PTS", "REB", "AST", "STL", "BLK", "FG3M"]:
         logs[column] = pd.to_numeric(logs[column], errors="coerce").fillna(0.0)
     logs["opponent_team"], logs["is_home"] = zip(*logs["MATCHUP"].map(_matchup_columns))
     logs["player_key"] = logs["PLAYER_NAME"].map(_name_key)
@@ -174,7 +175,7 @@ def _current_team_defense_factors() -> dict[str, dict[str, float]]:
                 factors[str(team)][market_type] = 1.0
                 continue
             raw = float(team_avg / league_avg)
-            clip_low, clip_high = (0.92, 1.08) if market_type == "points" else (0.88, 1.12)
+            clip_low, clip_high = (0.80, 1.20) if market_type == "points" else (0.75, 1.25)
             factors[str(team)][market_type] = float(np.clip(raw, clip_low, clip_high))
     return factors
 
@@ -260,7 +261,7 @@ def _home_away_factor(player_logs: pd.DataFrame, stat_col: str, is_home: bool | 
     season_mean = float(current[stat_col].mean())
     if season_mean <= 0:
         return 1.0
-    return float(np.clip(split_mean / season_mean, 0.95, 1.05))
+    return float(np.clip(split_mean / season_mean, 0.88, 1.12))
 
 
 def _project_player_stat(player_name: str, stat: str, home_team: str | None, away_team: str | None) -> dict[str, Any] | None:

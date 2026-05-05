@@ -2,6 +2,7 @@ import { AnimatePresence, LazyMotion, domAnimation, m, useReducedMotion } from '
 import {
   Activity,
   BarChart3,
+  Bot,
   Command,
   FlaskConical,
   LayoutGrid,
@@ -32,6 +33,7 @@ import {
   sections,
 } from '../lib/navigation'
 import { usePersistentState } from '../hooks/usePersistentState'
+import { AiPanel } from '../components/AiPanel'
 import type { League, WorkspaceSection } from '../types'
 
 const sectionIcons = {
@@ -73,6 +75,7 @@ export default function WorkspaceShell() {
   const [storedLeague, setStoredLeague] = usePersistentState<League>('isotonic:league', 'nba')
   const [railCollapsed, setRailCollapsed] = usePersistentState('isotonic:rail-collapsed', false)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [aiPanelOpen, setAiPanelOpen] = useState(false)
 
   const currentLeague = isLeague(params.league) ? params.league : normalizeLeague(storedLeague)
   useEffect(() => {
@@ -208,6 +211,14 @@ export default function WorkspaceShell() {
                   </button>
                 ))}
               </div>
+              <button
+                className={`ai-toggle-btn ${aiPanelOpen ? 'is-active' : ''}`}
+                onClick={() => setAiPanelOpen(v => !v)}
+                aria-label="Toggle AI assistant"
+              >
+                <Bot size={15} />
+                <span>AI</span>
+              </button>
               <Button tone="ghost" onClick={() => navigate('/app/system')}>
                 <ShieldCheck size={16} />
                 <span>System</span>
@@ -241,6 +252,11 @@ export default function WorkspaceShell() {
           ))}
         </div>
 
+        <AiPanel
+          open={aiPanelOpen}
+          onClose={() => setAiPanelOpen(false)}
+          context={`League: ${currentLeague}, Page: ${currentSection}`}
+        />
         <CommandPalette
           open={paletteOpen}
           onClose={() => setPaletteOpen(false)}

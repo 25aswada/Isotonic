@@ -1,6 +1,6 @@
 import type { HTMLAttributes, ReactNode } from 'react'
 import clsx from 'clsx'
-import { AlertTriangle, ArrowRight, LoaderCircle } from 'lucide-react'
+import { AlertTriangle, ArrowRight, CheckCircle2, LoaderCircle, X } from 'lucide-react'
 
 import { pct } from '../lib/format'
 
@@ -150,6 +150,48 @@ export function LoadingPanel({ label = 'Pulling signals' }: { label?: string }) 
         <p>Fetching the current board and shaping the workspace.</p>
       </div>
     </Surface>
+  )
+}
+
+export function ConfirmationOverlay({
+  open,
+  title,
+  body,
+  details,
+  onClose,
+}: {
+  open: boolean
+  title: string
+  body: string
+  details?: ReactNode
+  onClose: () => void
+}) {
+  if (!open) return null
+
+  return (
+    <div className="confirmation-overlay" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="confirmation-overlay__backdrop" onClick={onClose} />
+      <div className="confirmation-overlay__card">
+        <button className="confirmation-overlay__close" onClick={onClose} aria-label="Close confirmation">
+          <X size={16} />
+        </button>
+        <div className="confirmation-overlay__burst" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <div className="confirmation-overlay__icon">
+          <CheckCircle2 size={28} />
+        </div>
+        <div className="confirmation-overlay__copy">
+          <span className="section-kicker">Trade confirmed</span>
+          <h3>{title}</h3>
+          <p>{body}</p>
+        </div>
+        {details ? <div className="confirmation-overlay__details">{details}</div> : null}
+        <Button onClick={onClose}>Back to board</Button>
+      </div>
+    </div>
   )
 }
 

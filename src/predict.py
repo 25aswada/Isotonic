@@ -133,6 +133,29 @@ def predict_batch(
 
     df["home_win_prob"] = probs
     df["away_win_prob"] = 1.0 - probs
+
+    # ── Score estimation for spread/total combo legs ───────────────────────
+    # Uses each team's offensive/defensive efficiency and pace to estimate
+    # per-game scores independently of market prices.
+    _LEAGUE_AVG_RTG = 113.0
+    _HOME_COURT_PTS = 1.5
+    try:
+        h_off = pd.to_numeric(df.get("home_off_rtg", pd.Series(dtype=float)), errors="coerce")
+        a_off = pd.to_numeric(df.get("away_off_rtg", pd.Series(dtype=float)), errors="coerce")
+        h_def = pd.to_numeric(df.get("home_def_rtg", pd.Series(dtype=float)), errors="coerce")
+        a_def = pd.to_numeric(df.get("away_def_rtg", pd.Series(dtype=float)), errors="coerce")
+        h_pace = pd.to_numeric(df.get("home_pace", pd.Series(dtype=float)), errors="coerce")
+        a_pace = pd.to_numeric(df.get("away_pace", pd.Series(dtype=float)), errors="coerce")
+        if h_off is None or h_off.isna().all():
+            raise ValueError("missing rating features")
+        avg_pace = (h_pace.fillna(98) + a_pace.fillna(98)) / 2
+        home_def_adj = a_def.fillna(_LEAGUE_AVG_RTG) / _LEAGUE_AVG_RTG
+        away_def_adj = h_def.fillna(_LEAGUE_AVG_RTG) / _LEAGUE_AVG_RTG
+        df["pred_home_score"] = (h_off.fillna(_LEAGUE_AVG_RTG) * home_def_adj * avg_pace / 100 + _HOME_COURT_PTS).round(1)
+        df["pred_away_score"] = (a_off.fillna(_LEAGUE_AVG_RTG) * away_def_adj * avg_pace / 100).round(1)
+    except Exception:
+        pass
+
     return df
 
 

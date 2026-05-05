@@ -414,6 +414,7 @@ export interface BracketResponse {
   available?: boolean
   bracket: Array<Record<string, string | number | null>>
   advancement?: AdvancementRow[]
+  results?: Array<Record<string, string | number | null>>
 }
 
 export interface TeamListResponse {

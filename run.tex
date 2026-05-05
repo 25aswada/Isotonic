@@ -1,0 +1,6 @@
+Run in separate terminal tabs:
+cd ~/Desktop/Prediction_Model && /opt/miniconda3/bin/uvicorn server:app --port 8000
+cd ~/Desktop/Prediction_Model/frontend && npm run dev
+
+Kill: 
+lsof -i :8000 -i :5173 | grep LISTEN | awk '{print $2}' | xargs kill

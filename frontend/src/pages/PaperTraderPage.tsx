@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Trash2 } from 'lucide-react'
+import { ChevronDown, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams } from 'react-router-dom'
 
-import { Button, EmptyState, ErrorState, MetricCard, Pill, Surface, TeamLogo } from '../components/ui'
+import { Button, ConfirmationOverlay, EmptyState, ErrorState, MetricCard, Pill, Surface, TeamLogo } from '../components/ui'
 import {
   getAutoTradeStatus,
   getPaperCandidates,
@@ -85,7 +85,19 @@ function autoTradeSummary(status: AutoTradeStatus) {
   return 'Auto trade is armed. Eligible early lines will be paper-traded automatically during active hours.'
 }
 
-function ManualTradePanel({ league, bankroll }: { league: League; bankroll: PaperBankroll }) {
+function ManualTradePanel({
+  league,
+  bankroll,
+  onTradeConfirmed,
+  collapsed,
+  onToggleCollapse,
+}: {
+  league: League
+  bankroll: PaperBankroll
+  onTradeConfirmed: (title: string, body: string) => void
+  collapsed: boolean
+  onToggleCollapse: () => void
+}) {
   const [homeTeam, setHomeTeam] = useState('')
   const [awayTeam, setAwayTeam] = useState('')
   const [selectedTeam, setSelectedTeam] = useState('')
@@ -110,8 +122,8 @@ function ManualTradePanel({ league, bankroll }: { league: League; bankroll: Pape
     const games = [...(liveData?.in_progress ?? []), ...(liveData?.upcoming ?? [])]
     return games.map((game: any) => ({
       id: String(game.game_id ?? `${game.away_team}@${game.home_team}`),
-      homeTeam: game.home_team,
-      awayTeam: game.away_team,
+      homeTeam: game.home_full_name ?? game.home_team,
+      awayTeam: game.away_full_name ?? game.away_team,
       tipoffUtc: game.tipoff_utc,
       statusText: game.game_status_text,
       homeMarket: game.kalshi_home_prob,
@@ -134,7 +146,10 @@ function ManualTradePanel({ league, bankroll }: { league: League; bankroll: Pape
       void queryClient.invalidateQueries({ queryKey: ['paper-positions', league] })
       void queryClient.invalidateQueries({ queryKey: ['paper-candidates', league] })
       void queryClient.invalidateQueries({ queryKey: ['manual-paper-preview', league] })
-      
+      onTradeConfirmed(
+        `${selectedTeam} paper trade placed`,
+        `${money(customStake)} was deployed on ${selectedTeam} via ${titleCase(marketSource)}.`,
+      )
       setSelectedTeam('')
     },
   })
@@ -148,10 +163,20 @@ function ManualTradePanel({ league, bankroll }: { league: League; bankroll: Pape
           <span className="section-kicker">Manual trade</span>
           <h3>Trade any game</h3>
         </div>
-        <Pill tone="accent">{money(bankroll.available_cash)} free</Pill>
+        <div className="paper-actions">
+          <button
+            className={`stack-panel__toggle ${collapsed ? 'is-collapsed' : ''}`}
+            onClick={onToggleCollapse}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? 'Expand manual trade' : 'Collapse manual trade'}
+          >
+            <ChevronDown size={16} />
+          </button>
+          <Pill tone="accent">{money(bankroll.available_cash)} free</Pill>
+        </div>
       </div>
 
-      <div className="paper-manual">
+      {!collapsed ? <div className="paper-manual">
         <div className="paper-manual__board">
           {availableGames.map((game: any) => {
             const isSelected = game.homeTeam === homeTeam && game.awayTeam === awayTeam
@@ -323,7 +348,7 @@ function ManualTradePanel({ league, bankroll }: { league: League; bankroll: Pape
             </div>
           ) : null}
         </div>
-      </div>
+      </div> : null}
     </Surface>
   )
 }
@@ -501,7 +526,17 @@ function CandidateCard({
   )
 }
 
-function OpenPositionsPanel({ items, onDelete }: { items: PositionRecord[]; onDelete?: (tradeId: string) => void }) {
+function OpenPositionsPanel({
+  items,
+  onDelete,
+  collapsed,
+  onToggleCollapse,
+}: {
+  items: PositionRecord[]
+  onDelete?: (tradeId: string) => void
+  collapsed: boolean
+  onToggleCollapse: () => void
+}) {
   return (
     <Surface className="stack-panel">
       <div className="stack-panel__header">
@@ -509,9 +544,19 @@ function OpenPositionsPanel({ items, onDelete }: { items: PositionRecord[]; onDe
           <span className="section-kicker">Open positions</span>
           <h3>Capital at work</h3>
         </div>
-        <Pill>{items.length}</Pill>
+        <div className="paper-actions">
+          <button
+            className={`stack-panel__toggle ${collapsed ? 'is-collapsed' : ''}`}
+            onClick={onToggleCollapse}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? 'Expand open positions' : 'Collapse open positions'}
+          >
+            <ChevronDown size={16} />
+          </button>
+          <Pill>{items.length}</Pill>
+        </div>
       </div>
-      {items.length ? (
+      {!collapsed && items.length ? (
         <div className="position-list">
           {items.slice(0, 12).map((item, index) => {
             const stage = positionStage(item)
@@ -539,7 +584,7 @@ function OpenPositionsPanel({ items, onDelete }: { items: PositionRecord[]; onDe
                   <div className="position-row__meta">
                     <Pill tone={stage.tone}>{stage.label}</Pill>
                     {item.auto_placed ? <span>Auto placed</span> : <span>Manual</span>}
-                    <span>{item.tipoff_utc ? formatDateTime(item.tipoff_utc) : 'Tipoff unknown'}</span>
+                    <span>{item.placed_at ? formatDateTime(item.placed_at) : item.tipoff_utc ? formatDateTime(item.tipoff_utc) : 'Time unknown'}</span>
                   </div>
                 </div>
                 <div className="position-row__stats">
@@ -589,14 +634,22 @@ function OpenPositionsPanel({ items, onDelete }: { items: PositionRecord[]; onDe
             )
           })}
         </div>
-      ) : (
+      ) : !collapsed ? (
         <EmptyState title="No open positions" body="Nothing is currently active in the paper book." />
-      )}
+      ) : null}
     </Surface>
   )
 }
 
-function SettledPositionsPanel({ items }: { items: PositionRecord[] }) {
+function SettledPositionsPanel({
+  items,
+  collapsed,
+  onToggleCollapse,
+}: {
+  items: PositionRecord[]
+  collapsed: boolean
+  onToggleCollapse: () => void
+}) {
   return (
     <Surface className="table-surface">
       <div className="stack-panel__header paper-section-header">
@@ -604,9 +657,19 @@ function SettledPositionsPanel({ items }: { items: PositionRecord[] }) {
           <span className="section-kicker">Settled positions</span>
           <h3>Closed trade ledger</h3>
         </div>
-        <Pill>{items.length}</Pill>
+        <div className="paper-actions">
+          <button
+            className={`stack-panel__toggle ${collapsed ? 'is-collapsed' : ''}`}
+            onClick={onToggleCollapse}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? 'Expand settled positions' : 'Collapse settled positions'}
+          >
+            <ChevronDown size={16} />
+          </button>
+          <Pill>{items.length}</Pill>
+        </div>
       </div>
-      {items.length ? (
+      {!collapsed && items.length ? (
         <table className="data-table-modern">
           <thead>
             <tr>
@@ -647,9 +710,9 @@ function SettledPositionsPanel({ items }: { items: PositionRecord[] }) {
             ))}
           </tbody>
         </table>
-      ) : (
+      ) : !collapsed ? (
         <EmptyState title="No settled trades" body="Closed trades will show up here with realized P/L and outcomes." />
-      )}
+      ) : null}
     </Surface>
   )
 }
@@ -660,12 +723,16 @@ function AutoTradePanel({
   busyAction,
   actionMessage,
   onAction,
+  collapsed,
+  onToggleCollapse,
 }: {
   league: League
   status: AutoTradeStatus | undefined
   busyAction: AutoTradeConfig['action'] | null
   actionMessage: string
   onAction: (action: AutoTradeConfig['action']) => void
+  collapsed: boolean
+  onToggleCollapse: () => void
 }) {
   if (league !== 'nba') {
     return (
@@ -675,12 +742,22 @@ function AutoTradePanel({
             <span className="section-kicker">Auto trade</span>
             <h3>Unavailable for NCAA</h3>
           </div>
-          <Pill>Read only</Pill>
+          <div className="paper-actions">
+            <button
+              className={`stack-panel__toggle ${collapsed ? 'is-collapsed' : ''}`}
+              onClick={onToggleCollapse}
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? 'Expand auto trade' : 'Collapse auto trade'}
+            >
+              <ChevronDown size={16} />
+            </button>
+            <Pill>Read only</Pill>
+          </div>
         </div>
-        <EmptyState
+        {!collapsed ? <EmptyState
           title="Auto trade unavailable for NCAA"
           body="The NCAA paper book is manual only in v1. Status and controls will stay hidden until backend support exists."
-        />
+        /> : null}
       </Surface>
     )
   }
@@ -693,8 +770,16 @@ function AutoTradePanel({
             <span className="section-kicker">Auto trade</span>
             <h3>Control surface unavailable</h3>
           </div>
+          <button
+            className={`stack-panel__toggle ${collapsed ? 'is-collapsed' : ''}`}
+            onClick={onToggleCollapse}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? 'Expand auto trade' : 'Collapse auto trade'}
+          >
+            <ChevronDown size={16} />
+          </button>
         </div>
-        <ErrorState title="Auto-trade status unavailable" body="The server did not return the current auto-trade state." />
+        {!collapsed ? <ErrorState title="Auto-trade status unavailable" body="The server did not return the current auto-trade state." /> : null}
       </Surface>
     )
   }
@@ -715,9 +800,21 @@ function AutoTradePanel({
           <span className="section-kicker">Auto trade</span>
           <h3>Rules and controls</h3>
         </div>
-        <Pill tone={stateTone}>{!status.available ? 'Unavailable' : !status.enabled ? 'Paused' : status.mode === 'dry-run' ? 'Dry run' : 'Armed'}</Pill>
+        <div className="paper-actions">
+          <button
+            className={`stack-panel__toggle ${collapsed ? 'is-collapsed' : ''}`}
+            onClick={onToggleCollapse}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? 'Expand auto trade' : 'Collapse auto trade'}
+          >
+            <ChevronDown size={16} />
+          </button>
+          <Pill tone={stateTone}>{!status.available ? 'Unavailable' : !status.enabled ? 'Paused' : status.mode === 'dry-run' ? 'Dry run' : 'Armed'}</Pill>
+        </div>
       </div>
 
+      {!collapsed ? (
+        <>
       <p className="paper-copy">{autoTradeSummary(status)}</p>
 
       <div className="paper-auto__actions">
@@ -775,6 +872,8 @@ function AutoTradePanel({
           <span>{status.last_error}</span>
         </div>
       ) : null}
+        </>
+      ) : null}
     </Surface>
   )
 }
@@ -788,6 +887,12 @@ export default function PaperTraderPage() {
   const [busyCandidateId, setBusyCandidateId] = useState<string | null>(null)
   const [busyAutoAction, setBusyAutoAction] = useState<AutoTradeConfig['action'] | null>(null)
   const [dismissedCandidateIds, setDismissedCandidateIds] = useState<string[]>([])
+  const [confirmation, setConfirmation] = useState<{ title: string; body: string } | null>(null)
+  const [manualTradeCollapsed, setManualTradeCollapsed] = useState(false)
+  const [tradeQueueCollapsed, setTradeQueueCollapsed] = useState(false)
+  const [openPositionsCollapsed, setOpenPositionsCollapsed] = useState(false)
+  const [settledPositionsCollapsed, setSettledPositionsCollapsed] = useState(false)
+  const [autoTradeCollapsed, setAutoTradeCollapsed] = useState(false)
 
   const paperState = useQuery({
     queryKey: ['paper-state', league],
@@ -821,6 +926,13 @@ export default function PaperTraderPage() {
       if (busyCandidateId) {
         setDismissedCandidateIds((current) => Array.from(new Set([...current, busyCandidateId])))
       }
+      const candidate = candidates.find((item) => item.candidate_id === busyCandidateId)
+      if (candidate) {
+        setConfirmation({
+          title: `${candidate.contract_team ?? candidate.bet_side ?? 'Trade'} confirmed`,
+          body: `${money(Number(candidate.stake ?? 0))} was paper-traded on ${candidate.contract_team ?? candidate.bet_side ?? 'the selected side'}.`,
+        })
+      }
       invalidatePaperQueries()
     },
     onError: () => {
@@ -836,6 +948,10 @@ export default function PaperTraderPage() {
     onSuccess: (data) => {
       setStatusMessage(data.message ?? `Logged ${data.logged ?? 0} trades.`)
       setDismissedCandidateIds((current) => Array.from(new Set([...current, ...candidates.map((candidate) => candidate.candidate_id)])))
+      setConfirmation({
+        title: `${data.logged ?? 0} paper trades placed`,
+        body: data.message ?? 'All currently eligible paper trades were logged successfully.',
+      })
       invalidatePaperQueries()
     },
     onError: () => {
@@ -950,7 +1066,13 @@ export default function PaperTraderPage() {
 
       <div className="paper-layout">
         <div className="paper-layout__main">
-          <ManualTradePanel league={league} bankroll={bankroll} />
+          <ManualTradePanel
+            league={league}
+            bankroll={bankroll}
+            onTradeConfirmed={(title, body) => setConfirmation({ title, body })}
+            collapsed={manualTradeCollapsed}
+            onToggleCollapse={() => setManualTradeCollapsed((current) => !current)}
+          />
           
           <Surface className="stack-panel">
             <div className="stack-panel__header">
@@ -959,6 +1081,14 @@ export default function PaperTraderPage() {
                 <h3>Review and place candidate trades</h3>
               </div>
               <div className="paper-actions">
+                <button
+                  className={`stack-panel__toggle ${tradeQueueCollapsed ? 'is-collapsed' : ''}`}
+                  onClick={() => setTradeQueueCollapsed((current) => !current)}
+                  aria-expanded={!tradeQueueCollapsed}
+                  aria-label={tradeQueueCollapsed ? 'Expand trade queue' : 'Collapse trade queue'}
+                >
+                  <ChevronDown size={16} />
+                </button>
                 <Button
                   tone="secondary"
                   disabled={!candidates.length || bulkTradeMutation.isPending}
@@ -969,39 +1099,52 @@ export default function PaperTraderPage() {
                 {statusMessage ? <Pill tone="accent">{statusMessage}</Pill> : null}
               </div>
             </div>
-            <p className="paper-copy">
-              Primary manual flow: review each ticket, understand the gap between model and market, then place the trade.
-            </p>
-            {candidates.length ? (
-              <div className="paper-ticket-list">
-                {candidates.map((candidate) => (
-                  <CandidateCard
-                    key={candidate.candidate_id}
-                    candidate={candidate}
-                    busy={busyCandidateId === candidate.candidate_id && tradeMutation.isPending}
-                    onTrade={() => {
-                      setBusyCandidateId(candidate.candidate_id)
-                      setStatusMessage('')
-                      tradeMutation.mutate([candidate.candidate_id])
-                    }}
+            {!tradeQueueCollapsed ? (
+              <>
+                <p className="paper-copy">
+                  Primary manual flow: review each ticket, understand the gap between model and market, then place the trade.
+                </p>
+                {candidates.length ? (
+                  <div className="paper-ticket-list">
+                    {candidates.map((candidate) => (
+                      <CandidateCard
+                        key={candidate.candidate_id}
+                        candidate={candidate}
+                        busy={busyCandidateId === candidate.candidate_id && tradeMutation.isPending}
+                        onTrade={() => {
+                          setBusyCandidateId(candidate.candidate_id)
+                          setStatusMessage('')
+                          tradeMutation.mutate([candidate.candidate_id])
+                        }}
+                      />
+                    ))}
+                  </div>
+                ) : bankroll.available_cash <= 0 ? (
+                  <EmptyState
+                    title="No cash available"
+                    body="The queue is blocked because the paper book has no free capital right now."
                   />
-                ))}
-              </div>
-            ) : bankroll.available_cash <= 0 ? (
-              <EmptyState
-                title="No cash available"
-                body="The queue is blocked because the paper book has no free capital right now."
-              />
-            ) : (
-              <EmptyState
-                title="No candidates right now"
-                body={`No ${leagueLabels[league]} trade currently clears the paper-trading rules.`}
-              />
-            )}
+                ) : (
+                  <EmptyState
+                    title="No candidates right now"
+                    body={`No ${leagueLabels[league]} trade currently clears the paper-trading rules.`}
+                  />
+                )}
+              </>
+            ) : null}
           </Surface>
 
-          <OpenPositionsPanel items={openPositions} onDelete={handleDeleteTrade} />
-          <SettledPositionsPanel items={settledPositions} />
+          <OpenPositionsPanel
+            items={openPositions}
+            onDelete={handleDeleteTrade}
+            collapsed={openPositionsCollapsed}
+            onToggleCollapse={() => setOpenPositionsCollapsed((current) => !current)}
+          />
+          <SettledPositionsPanel
+            items={settledPositions}
+            collapsed={settledPositionsCollapsed}
+            onToggleCollapse={() => setSettledPositionsCollapsed((current) => !current)}
+          />
         </div>
 
         <div className="paper-layout__side">
@@ -1021,6 +1164,8 @@ export default function PaperTraderPage() {
               status={autoTrade.data}
               busyAction={busyAutoAction}
               actionMessage={autoTradeMutation.isPending ? 'Updating auto-trade controls…' : autoStatusMessage}
+              collapsed={autoTradeCollapsed}
+              onToggleCollapse={() => setAutoTradeCollapsed((current) => !current)}
               onAction={(action) => {
                 setBusyAutoAction(action)
                 setAutoStatusMessage('')
@@ -1030,6 +1175,12 @@ export default function PaperTraderPage() {
           )}
         </div>
       </div>
+      <ConfirmationOverlay
+        open={Boolean(confirmation)}
+        title={confirmation?.title ?? ''}
+        body={confirmation?.body ?? ''}
+        onClose={() => setConfirmation(null)}
+      />
     </div>
   )
 }

@@ -95,6 +95,28 @@ INJURY_NAME_NOISE = {
     "two",
     "way",
     "wrist",
+    "hamstring",
+    "tightness",
+    "maintenance",
+    "quadriceps",
+    "contusion",
+    "laceration",
+    "concussion",
+    "conditioning",
+    "personal",
+    "rest",
+    "groin",
+    "shin",
+    "chest",
+    "shoulder",
+    "neck",
+    "head",
+    "facial",
+    "dental",
+    "jaw",
+    "ribs",
+    "rib",
+    "torso",
 }
 
 
@@ -246,7 +268,7 @@ def _looks_like_name_token(token: str) -> bool:
         return False
     if any(ch.isdigit() for ch in token):
         return False
-    normalized = token.replace(",", "").replace(".", "").replace("'", "").replace("-", "")
+    normalized = token.replace(",", "").replace(".", "").replace("'", "").replace("-", "").replace(";", "")
     if normalized.lower() in INJURY_NAME_NOISE:
         return False
     return bool(normalized) and normalized[0].isupper()
@@ -287,6 +309,7 @@ def _player_start_metadata(lines: list[str], start_idx: int) -> tuple[int, int, 
 def _is_section_break(line: str) -> bool:
     return bool(
         re.fullmatch(r"\d{2}:\d{2}", line)
+        or re.fullmatch(r"\d{2}/\d{2}/\d{4}", line)
         or line == "(ET)"
         or re.fullmatch(r"[A-Z]{2,3}@[A-Z]{2,3}", line)
         or line in {"Injury", "Report:", "Page", "Game", "Date", "Time", "Matchup", "Team", "Player", "Name", "Current", "Status", "Reason", "of"}
@@ -297,7 +320,7 @@ def _parse_team_players_lines(team_lines: list[str], team_abbr: str, team_name: 
     if not team_lines:
         return []
 
-    if "NOT YET SUBMITTED" in team_lines:
+    if "NOT YET SUBMITTED" in " ".join(team_lines):
         return [{
             "matchup": matchup,
             "team": team_abbr,
@@ -340,7 +363,7 @@ def _parse_team_players_lines(team_lines: list[str], team_abbr: str, team_name: 
 def _game_timestamp_from_lines(lines: list[str], matchup_idx: int) -> pd.Timestamp | None:
     game_date_str = None
     game_time_str = None
-    for idx in range(matchup_idx - 1, max(matchup_idx - 6, -1), -1):
+    for idx in range(matchup_idx - 1, -1, -1):
         token = lines[idx]
         if game_time_str is None and re.fullmatch(r"\d{2}:\d{2}", token):
             game_time_str = token
@@ -403,17 +426,28 @@ def _parse_injury_report_text(text: str) -> pd.DataFrame:
 
         away_span = _match_team_name(segment, abbr_to_candidates.get(away_abbr, [abbr_to_name.get(away_abbr, away_abbr)]))
         home_span = _match_team_name(segment, abbr_to_candidates.get(home_abbr, [abbr_to_name.get(home_abbr, home_abbr)]))
-        if away_span is None or home_span is None:
+        if away_span is None and home_span is None:
             continue
 
-        away_start, away_end, away_name = away_span
-        home_start, home_end, home_name = home_span
-        if away_start < home_start:
-            away_lines = segment[away_end:home_start]
-            home_lines = segment[home_end:]
-        else:
-            home_lines = segment[home_end:away_start]
+        if away_span is not None and home_span is not None:
+            away_start, away_end, away_name = away_span
+            home_start, home_end, home_name = home_span
+            if away_start < home_start:
+                away_lines = segment[away_end:home_start]
+                home_lines = segment[home_end:]
+            else:
+                home_lines = segment[home_end:away_start]
+                away_lines = segment[away_end:]
+        elif away_span is not None:
+            away_start, away_end, away_name = away_span
             away_lines = segment[away_end:]
+            home_name = abbr_to_name.get(home_abbr, home_abbr)
+            home_lines = []
+        else:
+            home_start, home_end, home_name = home_span
+            home_lines = segment[home_end:]
+            away_name = abbr_to_name.get(away_abbr, away_abbr)
+            away_lines = []
 
         game_timestamp = _game_timestamp_from_lines(lines, matchup_idx)
         if game_timestamp is None:
@@ -550,7 +584,7 @@ def build_team_availability_adjustments(
     else:
         player_stats = pd.DataFrame(columns=["TEAM_ABBREVIATION", "PLAYER_NAME", "name_key", "name_tokens", "impact_score"])
 
-    injuries = injuries_df.copy()
+    injuries = injuries_df[injuries_df["player_name"].notna()].copy()
     injuries["player_key"] = injuries["player_name"].fillna("").map(_name_key)
     injuries["player_name_raw"] = injuries["player_name"]
     injuries["status_weight"] = injuries["status"].map(config.INJURY_STATUS_WEIGHTS).fillna(0.0)

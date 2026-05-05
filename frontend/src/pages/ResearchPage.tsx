@@ -9,12 +9,13 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { BarChart3, Shield, Swords, TrendingUp, Trophy, Zap } from 'lucide-react'
+import { BarChart3, Shield, Swords, TrendingUp } from 'lucide-react'
 import { useParams } from 'react-router-dom'
 
 import { EmptyState, ErrorState, LoadingPanel, MetricCard, Pill, Surface, TeamLogo } from '../components/ui'
 import {
   getBracket,
+  getLive,
   getMatchup,
   getMatchupTeams,
   getTeamExplorer,
@@ -25,7 +26,7 @@ import { isLeague, leagueLabels, normalizeLeague } from '../lib/navigation'
 import { teamAccent } from '../lib/teamColor'
 
 import { usePersistentState } from '../hooks/usePersistentState'
-import type { AdvancementRow, League, MatchupResponse, TeamExplorerResponse } from '../types'
+import type { League, LivePayload, MatchupResponse, TeamExplorerResponse } from '../types'
 
 type ResearchTab = 'matchup' | 'teams' | 'bracket'
 
@@ -668,12 +669,6 @@ const BRACKET_SEED_PAIRS = [
   [2, 15],
 ] as const
 
-function bracketNumber(value: string | number | null | undefined) {
-  if (value == null) return null
-  const numeric = Number(value)
-  return Number.isFinite(numeric) ? numeric : null
-}
-
 function buildBracketSeedLookup(rows: BracketRow[]) {
   const lookup = new Map<string, number>()
 
@@ -698,14 +693,287 @@ function bracketTeamName(row: BracketRow, side: 'a' | 'b') {
   return String(row[`team_${side}_name`] ?? 'TBD')
 }
 
-function bracketTeamWinProb(row: BracketRow, side: 'a' | 'b') {
-  const winProb = bracketNumber(row.win_prob)
-  if (winProb == null) return null
+function bracketNormalizeTeamName(value: string | null | undefined) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/'/g, '')
+    .replace(/\./g, '')
+    .replace(/&/g, 'and')
+    .replace(/\bsaint\b/g, 'st')
+    .replace(/\bst\b/g, 'st')
+    .replace(/\bcalifornia\b/g, 'cal')
+    .replace(/\bmiami ohio\b/g, 'miami oh')
+    .replace(/\bca baptist\b/g, 'cal baptist')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
-  const winner = String(row.winner_name ?? '')
-  const team = bracketTeamName(row, side)
-  if (!winner) return side === 'a' ? winProb : 1 - winProb
-  return winner === team ? winProb : 1 - winProb
+function bracketNamesMatch(left: string | null | undefined, right: string | null | undefined) {
+  const a = bracketNormalizeTeamName(left)
+  const b = bracketNormalizeTeamName(right)
+  if (!a || !b) return false
+  return a === b || a.startsWith(b) || b.startsWith(a) || a.includes(b) || b.includes(a)
+}
+
+function buildActualResultLookup(
+  liveData?: LivePayload | null,
+  bracketResults?: Array<Record<string, string | number | null>>,
+) {
+  const results: Array<{ winner: string | null; homeTeam: string; awayTeam: string }> = []
+  for (const row of bracketResults ?? []) {
+    const away = String(row.away_team ?? '').trim()
+    const home = String(row.home_team ?? '').trim()
+    const winner = String(row.winner_name ?? '').trim()
+    if (!away || !home || !winner) continue
+    results.push({ winner, awayTeam: away, homeTeam: home })
+  }
+
+  const games = [
+    ...(liveData?.final ?? []),
+    ...(liveData?.in_progress ?? []),
+    ...(liveData?.upcoming ?? []),
+  ]
+
+  for (const game of games) {
+    const away = String(game.away_full_name ?? game.away_team ?? '').trim()
+    const home = String(game.home_full_name ?? game.home_team ?? '').trim()
+    if (!away || !home) continue
+
+    const isFinal = Number(game.game_status) === 3
+    const awayScore = Number(game.away_score ?? 0)
+    const homeScore = Number(game.home_score ?? 0)
+    const winner = isFinal ? (awayScore > homeScore ? away : home) : null
+    results.push({ winner, awayTeam: away, homeTeam: home })
+  }
+
+  return results
+}
+
+function findActualResult(
+  actualResults: Array<{ winner: string | null; homeTeam: string; awayTeam: string }>,
+  teamA: string,
+  teamB: string,
+) {
+  return actualResults.find((result) => (
+    (bracketNamesMatch(teamA, result.awayTeam) && bracketNamesMatch(teamB, result.homeTeam))
+    || (bracketNamesMatch(teamA, result.homeTeam) && bracketNamesMatch(teamB, result.awayTeam))
+  ))
+}
+
+function mapActualWinnerToBracketTeam(teamA: string, teamB: string, winner: string | null) {
+  if (!winner) return null
+  if (bracketNamesMatch(teamA, winner)) return teamA
+  if (bracketNamesMatch(teamB, winner)) return teamB
+  return null
+}
+
+function buildCurrentBracketRows(
+  rows: BracketRow[],
+  liveData?: LivePayload | null,
+  bracketResults?: Array<Record<string, string | number | null>>,
+) {
+  const cleanRow = (row: BracketRow): BracketRow => ({
+    ...row,
+    winner_id: null,
+    winner_name: null,
+    win_prob: null,
+    sim_win_pct: null,
+    is_upset: 0,
+    winner_seed: null,
+    loser_seed: null,
+    winner_seed_edge: null,
+  })
+
+  const placeholder = (round: string, region: string, index: number): BracketRow => ({
+    round,
+    region,
+    order: index,
+    team_a_id: null,
+    team_b_id: null,
+    team_a_name: 'TBD',
+    team_b_name: 'TBD',
+    winner_id: null,
+    winner_name: null,
+    win_prob: null,
+    sim_win_pct: null,
+    is_upset: 0,
+    winner_seed: null,
+    loser_seed: null,
+    seed_baseline_prob: null,
+    winner_seed_edge: null,
+  })
+  const withTeams = (row: BracketRow, teamA: string, teamB: string): BracketRow => ({
+    ...row,
+    team_a_name: teamA,
+    team_b_name: teamB,
+  })
+
+  const playIns = rows
+    .filter((row) => row.round === 'First Four')
+    .map(cleanRow)
+
+  const actualResults = buildActualResultLookup(liveData, bracketResults)
+  const playInWinnerBySeedRegion = new Map<string, string>()
+
+  for (const row of playIns) {
+    const teamA = bracketTeamName(row, 'a')
+    const teamB = bracketTeamName(row, 'b')
+    const actual = findActualResult(actualResults, teamA, teamB)
+    const bracketWinner = mapActualWinnerToBracketTeam(teamA, teamB, actual?.winner ?? null)
+    if (bracketWinner) {
+      row.winner_name = bracketWinner
+      const winnerSeed = row.winner_seed ?? bracketTeamSeed(buildBracketSeedLookup(rows), row, bracketWinner === teamA ? 'a' : 'b')
+      if (winnerSeed != null) {
+        playInWinnerBySeedRegion.set(`${row.region}::${winnerSeed}`, bracketWinner)
+      }
+    }
+  }
+
+  const regionRows = Object.values(BRACKET_REGION_SIDES)
+    .flat()
+    .flatMap((region) => {
+      const round64 = rows
+        .filter((row) => row.region === region && row.round === 'Round of 64')
+        .slice(0, 8)
+        .map(cleanRow)
+
+      round64.forEach((row, index) => {
+        const [seedA, seedB] = BRACKET_SEED_PAIRS[index] ?? []
+        if (seedA != null) {
+          const playInWinner = playInWinnerBySeedRegion.get(`${region}::${seedA}`)
+          if (playInWinner) row.team_a_name = playInWinner
+        }
+        if (seedB != null) {
+          const playInWinner = playInWinnerBySeedRegion.get(`${region}::${seedB}`)
+          if (playInWinner) row.team_b_name = playInWinner
+        }
+
+        const teamA = bracketTeamName(row, 'a')
+        const teamB = bracketTeamName(row, 'b')
+        const actual = findActualResult(actualResults, teamA, teamB)
+        const bracketWinner = mapActualWinnerToBracketTeam(teamA, teamB, actual?.winner ?? null)
+        if (bracketWinner) {
+          row.winner_name = bracketWinner
+        }
+      })
+
+      const round32 = Array.from({ length: 4 }, (_, index) => {
+        const sourceA = round64[index * 2]
+        const sourceB = round64[(index * 2) + 1]
+        return withTeams(
+          placeholder('Round of 32', region, index),
+          String(sourceA?.winner_name ?? 'TBD'),
+          String(sourceB?.winner_name ?? 'TBD'),
+        )
+      })
+
+      round32.forEach((row) => {
+        const teamA = bracketTeamName(row, 'a')
+        const teamB = bracketTeamName(row, 'b')
+        if (teamA === 'TBD' || teamB === 'TBD') return
+        const actual = findActualResult(actualResults, teamA, teamB)
+        const bracketWinner = mapActualWinnerToBracketTeam(teamA, teamB, actual?.winner ?? null)
+        if (bracketWinner) {
+          row.winner_name = bracketWinner
+        }
+      })
+
+      const sweet16 = Array.from({ length: 2 }, (_, index) => {
+        const sourceA = round32[index * 2]
+        const sourceB = round32[(index * 2) + 1]
+        return withTeams(
+          placeholder('Sweet 16', region, index),
+          String(sourceA?.winner_name ?? 'TBD'),
+          String(sourceB?.winner_name ?? 'TBD'),
+        )
+      })
+
+      sweet16.forEach((row) => {
+        const teamA = bracketTeamName(row, 'a')
+        const teamB = bracketTeamName(row, 'b')
+        if (teamA === 'TBD' || teamB === 'TBD') return
+        const actual = findActualResult(actualResults, teamA, teamB)
+        const bracketWinner = mapActualWinnerToBracketTeam(teamA, teamB, actual?.winner ?? null)
+        if (bracketWinner) {
+          row.winner_name = bracketWinner
+        }
+      })
+
+      const elite8 = withTeams(
+        placeholder('Elite 8', region, 0),
+        String(sweet16[0]?.winner_name ?? 'TBD'),
+        String(sweet16[1]?.winner_name ?? 'TBD'),
+      )
+
+      {
+        const teamA = bracketTeamName(elite8, 'a')
+        const teamB = bracketTeamName(elite8, 'b')
+        if (teamA !== 'TBD' && teamB !== 'TBD') {
+          const actual = findActualResult(actualResults, teamA, teamB)
+          const bracketWinner = mapActualWinnerToBracketTeam(teamA, teamB, actual?.winner ?? null)
+          if (bracketWinner) {
+            elite8.winner_name = bracketWinner
+          }
+        }
+      }
+
+      return [
+        ...round64,
+        ...round32,
+        ...sweet16,
+        elite8,
+      ]
+    })
+
+  const eastWinner = regionRows.find((row) => row.region === 'East' && row.round === 'Elite 8')?.winner_name ?? 'TBD'
+  const southWinner = regionRows.find((row) => row.region === 'South' && row.round === 'Elite 8')?.winner_name ?? 'TBD'
+  const westWinner = regionRows.find((row) => row.region === 'West' && row.round === 'Elite 8')?.winner_name ?? 'TBD'
+  const midwestWinner = regionRows.find((row) => row.region === 'Midwest' && row.round === 'Elite 8')?.winner_name ?? 'TBD'
+
+  const finalFourTop = withTeams(
+    placeholder('Final Four', 'East vs Midwest', 0),
+    String(eastWinner),
+    String(midwestWinner),
+  )
+  const finalFourBottom = withTeams(
+    placeholder('Final Four', 'South vs West', 1),
+    String(southWinner),
+    String(westWinner),
+  )
+
+  ;[finalFourTop, finalFourBottom].forEach((row) => {
+    const teamA = bracketTeamName(row, 'a')
+    const teamB = bracketTeamName(row, 'b')
+    if (teamA === 'TBD' || teamB === 'TBD') return
+    const actual = findActualResult(actualResults, teamA, teamB)
+    const bracketWinner = mapActualWinnerToBracketTeam(teamA, teamB, actual?.winner ?? null)
+    if (bracketWinner) {
+      row.winner_name = bracketWinner
+    }
+  })
+
+  const titleGame = withTeams(
+    placeholder('National Championship', 'National Championship', 0),
+    String(finalFourTop.winner_name ?? 'TBD'),
+    String(finalFourBottom.winner_name ?? 'TBD'),
+  )
+
+  {
+    const teamA = bracketTeamName(titleGame, 'a')
+    const teamB = bracketTeamName(titleGame, 'b')
+    if (teamA !== 'TBD' && teamB !== 'TBD') {
+      const actual = findActualResult(actualResults, teamA, teamB)
+      const bracketWinner = mapActualWinnerToBracketTeam(teamA, teamB, actual?.winner ?? null)
+      if (bracketWinner) {
+        titleGame.winner_name = bracketWinner
+      }
+    }
+  }
+
+  const finalRounds = [finalFourTop, finalFourBottom, titleGame]
+
+  return [...playIns, ...regionRows, ...finalRounds]
 }
 
 function BracketTeamRow({
@@ -721,18 +989,14 @@ function BracketTeamRow({
   const seed = bracketTeamSeed(seedLookup, row, side)
   const winner = String(row.winner_name ?? '')
   const isWinner = winner === team
-  const winProb = bracketTeamWinProb(row, side)
-  const isUpset = isWinner && Boolean(row.is_upset)
 
   return (
-    <div className={`tournament-match__team ${isWinner ? 'is-winner' : winner ? 'is-loser' : ''} ${isUpset ? 'is-upset' : ''}`}>
+    <div className={`tournament-match__team ${isWinner ? 'is-winner' : winner ? 'is-loser' : ''}`}>
       <div className="tournament-match__team-main">
         <span className="tournament-match__seed">{seed ?? '—'}</span>
         <TeamLogo team={team} size={16} className="tournament-match__logo" />
         <span className="tournament-match__name">{team}</span>
-        {isUpset ? <Zap size={12} className="tournament-match__upset-icon" /> : null}
       </div>
-      <span className="tournament-match__prob">{winProb != null ? pct0(winProb) : '—'}</span>
     </div>
   )
 }
@@ -819,100 +1083,34 @@ function CenterMatch({
   )
 }
 
-function ContendersTable({ advancement }: { advancement: AdvancementRow[] }) {
-  const top = advancement.slice(0, 16)
-  if (!top.length) return null
-
-  return (
-    <Surface className="stack-panel">
-      <div className="stack-panel__header">
-        <div>
-          <span className="section-kicker">Monte Carlo · 10,000 simulations</span>
-          <h3>Championship Contenders</h3>
-        </div>
-        <Trophy size={16} />
-      </div>
-      <div className="contenders-table">
-        <div className="contenders-table__header">
-          <span>Team</span>
-          <span>S16</span>
-          <span>E8</span>
-          <span>FF</span>
-          <span>Title</span>
-        </div>
-        {top.map((row) => (
-          <div className="contenders-table__row" key={row.TeamID}>
-            <div className="contenders-table__team">
-              <span className="contenders-table__seed">{row.seed_num}</span>
-              <TeamLogo team={row.TeamName} size={18} />
-              <span>{row.TeamName}</span>
-            </div>
-            <span>{pct0(row['Sweet 16'])}</span>
-            <span>{pct0(row['Elite 8'])}</span>
-            <span>{pct0(row['Final Four'])}</span>
-            <span className="contenders-table__champ">{pct0(row.Championship)}</span>
-          </div>
-        ))}
-      </div>
-    </Surface>
+function BracketBoard({
+  rows,
+  liveData,
+  bracketResults,
+}: {
+  rows: BracketRow[]
+  liveData?: LivePayload
+  bracketResults?: Array<Record<string, string | number | null>>
+}) {
+  const displayRows = useMemo(
+    () => buildCurrentBracketRows(rows, liveData, bracketResults),
+    [rows, liveData, bracketResults],
   )
-}
-
-function UpsetList({ rows }: { rows: BracketRow[] }) {
-  const upsets = rows.filter((row) => Boolean(row.is_upset))
-  if (!upsets.length) return null
-
-  return (
-    <Surface className="stack-panel">
-      <div className="stack-panel__header">
-        <div>
-          <span className="section-kicker">Model-predicted</span>
-          <h3>Upset Picks</h3>
-        </div>
-        <Zap size={16} />
-      </div>
-      <div className="upset-list">
-        {upsets.map((row, i) => (
-          <div className="upset-list__row" key={i}>
-            <Pill tone="accent">{String(row.round)}</Pill>
-            <div className="upset-list__matchup">
-              <strong>({row.winner_seed}) {String(row.winner_name)}</strong>
-              <span className="upset-list__over">over</span>
-              <span>({row.loser_seed}) {String(row.winner_name) === String(row.team_a_name) ? String(row.team_b_name) : String(row.team_a_name)}</span>
-            </div>
-            <span className="upset-list__prob">{pct0(Number(row.win_prob ?? 0.5))}</span>
-          </div>
-        ))}
-      </div>
-    </Surface>
-  )
-}
-
-function BracketBoard({ rows, advancement }: { rows: BracketRow[]; advancement?: AdvancementRow[] }) {
-  const seedLookup = useMemo(() => buildBracketSeedLookup(rows), [rows])
-  const playInRows = rows.filter((row) => row.round === 'First Four')
-  const semifinalRows = rows.filter((row) => row.round === 'Final Four')
-  const titleRow = rows.find((row) => row.round === 'National Championship')
-  const champion = String(titleRow?.winner_name ?? 'Projected champion')
-  const championProb = titleRow
-    ? bracketTeamWinProb(titleRow, champion === bracketTeamName(titleRow, 'a') ? 'a' : 'b')
-    : null
-  const championAdvancement = advancement?.find((row) => row.TeamName === champion)
-  const champPctMc = championAdvancement?.Championship
-
-  const upsetCount = rows.filter((row) => Boolean(row.is_upset)).length
+  const seedLookup = useMemo(() => buildBracketSeedLookup(displayRows), [displayRows])
+  const playInRows = displayRows.filter((row) => row.round === 'First Four')
+  const semifinalRows = displayRows.filter((row) => row.round === 'Final Four')
+  const titleRow = displayRows.find((row) => row.round === 'National Championship')
+  const projectionDate = String(rows[0]?.projection_date ?? '')
 
   return (
     <>
       <Surface className="tournament-board" tone="accent">
         <div className="tournament-board__hero">
-          <span className="section-kicker">Men&apos;s tournament · Monte Carlo bracket</span>
-          <h2>Projected Bracket</h2>
+          <span className="section-kicker">Men&apos;s tournament · official field</span>
+          <h2>Current Bracket</h2>
           <p>
-            {champion !== 'Projected champion'
-              ? `${champion} is the model champion${champPctMc != null ? ` (${pct0(champPctMc)} title probability)` : ''}.`
-              : 'Current simulated path through the field.'}
-            {upsetCount > 0 ? ` ${upsetCount} upset${upsetCount > 1 ? 's' : ''} picked.` : ''}
+            Real current bracket slots only. Future rounds stay `TBD` until results are known.
+            {projectionDate ? ` Field snapshot: ${projectionDate}.` : ''}
           </p>
         </div>
 
@@ -934,7 +1132,7 @@ function BracketBoard({ rows, advancement }: { rows: BracketRow[]; advancement?:
           <div className="tournament-board__builder">
             <div className="tournament-board__side">
               {BRACKET_REGION_SIDES.left.map((region) => (
-                <RegionBracket key={region} region={region} rows={rows} seedLookup={seedLookup} side="left" />
+                <RegionBracket key={region} region={region} rows={displayRows} seedLookup={seedLookup} side="left" />
               ))}
             </div>
 
@@ -947,34 +1145,21 @@ function BracketBoard({ rows, advancement }: { rows: BracketRow[]; advancement?:
               ) : null}
               <div className="tournament-center__champion">
                 <div className="tournament-center__champion-badge">
-                  <Trophy size={18} />
-                  <span>Projected champion</span>
+                  <span>Awaiting results</span>
                 </div>
-                <TeamLogo team={champion} size={34} />
-                <strong>{champion}</strong>
-                <p>
-                  {champPctMc != null
-                    ? `${pct0(champPctMc)} championship probability across 10K simulations.`
-                    : championProb != null
-                      ? `${pct0(championProb)} in the title matchup.`
-                      : 'Current title-game winner.'}
-                </p>
+                <strong>TBD</strong>
+                <p>The title path will fill in as the real tournament advances.</p>
               </div>
             </div>
 
             <div className="tournament-board__side">
               {BRACKET_REGION_SIDES.right.map((region) => (
-                <RegionBracket key={region} region={region} rows={rows} seedLookup={seedLookup} side="right" />
+                <RegionBracket key={region} region={region} rows={displayRows} seedLookup={seedLookup} side="right" />
               ))}
             </div>
           </div>
         </div>
       </Surface>
-
-      <div className="content-grid">
-        <UpsetList rows={rows} />
-        {advancement?.length ? <ContendersTable advancement={advancement} /> : null}
-      </div>
     </>
   )
 }
@@ -1002,8 +1187,18 @@ export default function ResearchPage() {
 
   useEffect(() => {
     if (!matchupTeams.data?.teams.length) return
-    if (!teamA) setTeamA(matchupTeams.data.teams[0])
-    if (!teamB) setTeamB(matchupTeams.data.teams[1] ?? matchupTeams.data.teams[0])
+    const teams = matchupTeams.data.teams
+    const fallbackA = teams[0] ?? ''
+    const fallbackB = teams.find((team) => team !== (teamA || fallbackA)) ?? teams[1] ?? fallbackA
+
+    if (!teamA || !teams.includes(teamA)) {
+      setTeamA(fallbackA)
+      return
+    }
+
+    if (!teamB || !teams.includes(teamB) || teamB === teamA) {
+      setTeamB(fallbackB)
+    }
   }, [matchupTeams.data?.teams, setTeamA, setTeamB, teamA, teamB])
 
   const matchup = useQuery({
@@ -1011,6 +1206,14 @@ export default function ResearchPage() {
     queryFn: () => getMatchup(league, teamA, teamB),
     enabled: Boolean(teamA && teamB && teamA !== teamB),
   })
+
+  const matchupSelectionReady = Boolean(
+    teamA
+    && teamB
+    && teamA !== teamB
+    && matchupTeams.data?.teams?.includes(teamA)
+    && matchupTeams.data?.teams?.includes(teamB),
+  )
 
   const explorerTeams = useQuery({
     queryKey: ['team-explorer-teams', league],
@@ -1033,6 +1236,12 @@ export default function ResearchPage() {
     queryKey: ['bracket'],
     queryFn: getBracket,
     enabled: league === 'ncaab' && tab === 'bracket',
+  })
+  const bracketLive = useQuery({
+    queryKey: ['live', 'ncaab', 'bracket'],
+    queryFn: () => getLive('ncaab'),
+    enabled: league === 'ncaab' && tab === 'bracket',
+    refetchInterval: 60_000,
   })
 
   if (matchupTeams.isLoading) return <LoadingPanel label="Preparing the research deck" />
@@ -1057,7 +1266,9 @@ export default function ResearchPage() {
       </Surface>
 
       {tab === 'matchup' ? (
-        matchup.isLoading ? (
+        !matchupSelectionReady ? (
+          <EmptyState title="Choose two different teams" body="Select a valid Team A and Team B to score the matchup." />
+        ) : matchup.isLoading ? (
           <LoadingPanel label="Scoring the matchup" />
         ) : matchup.isError || !matchup.data ? (
           <ErrorState title="Matchup unavailable" body="The matchup engine did not return a usable payload." />
@@ -1112,11 +1323,15 @@ export default function ResearchPage() {
 
       {tab === 'bracket' ? (
         bracket.isLoading ? (
-          <LoadingPanel label="Projecting the bracket board" />
+          <LoadingPanel label="Loading the current bracket" />
         ) : bracket.isError || !bracket.data ? (
-          <ErrorState title="Bracket unavailable" body="The current projected bracket could not be loaded." />
+          <ErrorState title="Bracket unavailable" body="The current bracket could not be loaded." />
         ) : (
-          <BracketBoard rows={bracket.data.bracket ?? []} advancement={bracket.data.advancement} />
+          <BracketBoard
+            rows={bracket.data.bracket ?? []}
+            liveData={bracketLive.data}
+            bracketResults={bracket.data.results}
+          />
         )
       ) : null}
     </div>
