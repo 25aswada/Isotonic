@@ -3165,6 +3165,10 @@ async def overview(league: str = "nba"):
 
 
 # ── System ────────────────────────────────────────────────────────────────────
+@app.get("/ping")
+async def ping():
+    return {"ok": True}
+
 @app.get("/api/system/health")
 async def system_health():
     return _ok(await asyncio.get_event_loop().run_in_executor(None, _build_system_health_payload))
